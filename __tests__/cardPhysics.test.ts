@@ -1,27 +1,16 @@
-import { CARD_SHADOW_SPREAD_PX, layout } from '../lib/theme';
+import fs from 'fs';
+import path from 'path';
 import {
-  DECK_OPACITY_BY_DEPTH,
-  DECK_PEEK_STEP_PX,
-  DECK_PROMOTE_SPRING,
-  DECK_SCALE_BY_DEPTH,
   CARD_SPRING_BACK,
   CARD_THROW_SPRING,
-  deckClearTravelPx,
-  getStackPose,
-  getUndoParkY,
-  lerp,
   PAN_ACTIVE_OFFSET_Y_PX,
   PAN_FAIL_OFFSET_X_PX,
   PASS_DISTANCE_PX,
   PASS_VELOCITY_PX,
   UNDO_DISTANCE_PX,
-  UNDO_PARK_CLEARANCE_PX,
-  UNDO_SETTLE_SPRING,
   UNDO_VELOCITY_PX,
-  passProgress,
   shouldCommitPass,
   shouldCommitUndo,
-  undoReturnProgress,
 } from '../lib/motion';
 
 describe('vertical pass intent', () => {
@@ -62,117 +51,131 @@ describe('vertical pan lock', () => {
   });
 });
 
-describe('vertical progress', () => {
-  it('GEÇ damgası yalnız yukarı sürüklemede artar', () => {
-    expect(passProgress(-PASS_DISTANCE_PX)).toBe(1);
-    expect(passProgress(-2 * PASS_DISTANCE_PX)).toBe(1);
-    expect(passProgress(-42)).toBeCloseTo(42 / PASS_DISTANCE_PX, 5);
-    expect(passProgress(0)).toBe(0);
-    expect(passProgress(120)).toBe(0);
-  });
-
-  it('park eden kartın dönüş oranı yalnız aşağı çekişte artar', () => {
-    expect(undoReturnProgress(0, 600)).toBe(0);
-    expect(undoReturnProgress(-120, 600)).toBe(0);
-    expect(undoReturnProgress(300, 600)).toBeCloseTo(0.5, 5);
-    expect(undoReturnProgress(900, 600)).toBe(1);
-  });
-
-  it('geçersiz yol uzunluğu sıfır oran verir', () => {
-    expect(undoReturnProgress(300, 0)).toBe(0);
+describe('paging contract: commit thresholds stay 84/920', () => {
+  it('pass distance/velocity thresholds unchanged', () => {
+    expect(PASS_DISTANCE_PX).toBe(84);
+    expect(PASS_VELOCITY_PX).toBe(920);
+    expect(UNDO_DISTANCE_PX).toBe(84);
+    expect(UNDO_VELOCITY_PX).toBe(920);
   });
 });
 
-describe('deck clearance', () => {
-  const CARD_H = 616;
-
-  it('park clearance kartı clip dışında tutar (en az 24px + gölge)', () => {
-    expect(UNDO_PARK_CLEARANCE_PX).toBeGreaterThanOrEqual(24);
-    expect(deckClearTravelPx(CARD_H)).toBe(
-      CARD_H + UNDO_PARK_CLEARANCE_PX + CARD_SHADOW_SPREAD_PX,
-    );
-    expect(deckClearTravelPx(CARD_H)).toBeGreaterThanOrEqual(CARD_H + 24);
-  });
-
-  it('park pozisyonu çıkış yolunun tam tersidir', () => {
-    expect(getUndoParkY(CARD_H)).toBe(-deckClearTravelPx(CARD_H));
-  });
-});
-
-describe('motion language', () => {
-  it('hiçbir release springi overshoot yapmaz', () => {
-    expect(CARD_SPRING_BACK.overshootClamping).toBe(true);
+describe('paging contract: throw spring clamps overshoot', () => {
+  it('CARD_THROW_SPRING and spring-back clamp overshoot', () => {
     expect(CARD_THROW_SPRING.overshootClamping).toBe(true);
-    expect(UNDO_SETTLE_SPRING.overshootClamping).toBe(true);
+    expect(CARD_SPRING_BACK.overshootClamping).toBe(true);
   });
 });
 
-describe('stack geometry', () => {
-  const CARD_H = 616;
-  /** Kart merkezden ölçeklendiği için alt kenar = translateY - kaybedilen yarım. */
-  const bottomEdge = (depth: number): number => {
-    const pose = getStackPose(depth, CARD_H);
-    return pose.translateY - ((1 - pose.scale) * CARD_H) / 2;
-  };
+describe('paging contract: page stride = H (no peek stack)', () => {
+  const swipeCardSrc = fs.readFileSync(
+    path.join(__dirname, '../components/SwipeCard.tsx'),
+    'utf8',
+  );
+  const indexSrc = fs.readFileSync(
+    path.join(__dirname, '../app/(tabs)/index.tsx'),
+    'utf8',
+  );
 
-  it('ön kart çerçevede tam oturur', () => {
-    const pose = getStackPose(0, CARD_H);
-    expect(pose.scale).toBe(1);
-    expect(pose.translateY).toBe(0);
-    expect(pose.opacity).toBe(1);
-  });
-
-  it('arka kartlar alt kenarda şerit bırakır; 2. katman da görünür', () => {
-    expect(bottomEdge(1)).toBeCloseTo(DECK_PEEK_STEP_PX, 5);
-    expect(bottomEdge(2)).toBeCloseTo(DECK_PEEK_STEP_PX * 2, 5);
-    expect(getStackPose(1, CARD_H).opacity).toBe(DECK_OPACITY_BY_DEPTH[1]);
-    expect(getStackPose(1, CARD_H).scale).toBe(DECK_SCALE_BY_DEPTH[1]);
-    expect(getStackPose(2, CARD_H).opacity).toBe(DECK_OPACITY_BY_DEPTH[2]);
-    expect(getStackPose(9, CARD_H).opacity).toBe(DECK_OPACITY_BY_DEPTH[2]);
-  });
-
-  it('kenar payı peek adımıyla hizalıdır', () => {
-    expect(bottomEdge(1)).toBeLessThanOrEqual(layout.deckPeekStepMax);
-    expect(DECK_PEEK_STEP_PX).toBeGreaterThanOrEqual(layout.deckPeekStepMin);
-    expect(DECK_PEEK_STEP_PX).toBeLessThanOrEqual(layout.deckPeekStepMax);
-  });
-
-  it('taşan derinlik son basamağa sabitlenir', () => {
-    expect(getStackPose(9, CARD_H).scale).toBe(
-      DECK_SCALE_BY_DEPTH[DECK_SCALE_BY_DEPTH.length - 1],
+  it('pose is translateY = pageIndexSV * H + dragOffset only (no React pageIndex)', () => {
+    expect(swipeCardSrc).toMatch(
+      /pageIndexSV\.value \* H \+ dragOffset\.value/,
     );
+    // Animated pose worklet stays pageIndexSV-based (React pageIndex is static mount only).
+    const poseWorklet = swipeCardSrc.match(
+      /const animatedCardStyle = useAnimatedStyle\(\(\) => \{[\s\S]*?\}\);/,
+    );
+    expect(poseWorklet).not.toBeNull();
+    expect(poseWorklet![0]).toMatch(
+      /translateY:\s*pageIndexSV\.value \* H \+ dragOffset\.value/,
+    );
+    expect(poseWorklet![0]).not.toMatch(/translateY:\s*pageIndex\s*\*/);
+    expect(swipeCardSrc).not.toMatch(/getStackPose/);
+    expect(swipeCardSrc).not.toMatch(/deckPullY/);
+    expect(swipeCardSrc).not.toMatch(/UNDO_PARK/);
+    expect(swipeCardSrc).not.toMatch(/peekStepPx/);
+    expect(swipeCardSrc).not.toMatch(/stackIndex/);
+    expect(swipeCardSrc).not.toMatch(/poseScale/);
   });
 
-  it('js lerp worklet interpolate’e ihtiyaç duymaz', () => {
-    expect(lerp(0.97, 1, 0)).toBeCloseTo(0.97, 5);
-    expect(lerp(0.97, 1, 1)).toBeCloseTo(1, 5);
-    expect(lerp(8, 0, 0.5)).toBeCloseTo(4, 5);
+  it('static mount translateY = pageIndex * CARD_HEIGHT before animatedCardStyle', () => {
+    expect(swipeCardSrc).toMatch(
+      /slotTranslateStyle\s*=\s*useMemo\([\s\S]*?translateY:\s*pageIndex\s*\*\s*CARD_HEIGHT/,
+    );
+    const styleArray = swipeCardSrc.match(
+      /style=\{\[\s*styles\.slot,[\s\S]*?animatedCardStyle,?[\s\S]*?\]\}/,
+    );
+    expect(styleArray).not.toBeNull();
+    const block = styleArray![0];
+    const staticIdx = block.indexOf('slotTranslateStyle');
+    const animatedIdx = block.indexOf('animatedCardStyle');
+    expect(staticIdx).toBeGreaterThanOrEqual(0);
+    expect(animatedIdx).toBeGreaterThan(staticIdx);
+  });
+
+  it('Discover index atomically writes all pageIndexSVs + dragOffset via runOnUI', () => {
+    expect(indexSrc).toMatch(/runOnUI/);
+    expect(indexSrc).toMatch(/pageIndexSVByIdRef/);
+    expect(indexSrc).toMatch(/registerPageIndexSV/);
+    expect(indexSrc).toMatch(/dragOffset\.value = nextDrag/);
+  });
+
+  it('Discover index mounts prev/current/next without peek band', () => {
+    expect(indexSrc).toMatch(/pageIndex: -1/);
+    expect(indexSrc).toMatch(/pageIndex: 0/);
+    expect(indexSrc).toMatch(/pageIndex: 1/);
+    expect(indexSrc).toMatch(/pageIndex: 2/);
+    expect(indexSrc).not.toMatch(/deckPeekStepForHeight/);
+    expect(indexSrc).not.toMatch(/peekBandPx/);
+    expect(indexSrc).not.toMatch(/deckPullY/);
+    expect(indexSrc).not.toMatch(/stackIndex/);
+    expect(indexSrc).not.toMatch(/getStackPose/);
+  });
+
+  it('commit springs keep velocity transfer on pass and undo', () => {
+    const throwWithVelocity = /\.\.\.CARD_THROW_SPRING,\s*velocity:\s*vy/g;
+    const matches = swipeCardSrc.match(throwWithVelocity) ?? [];
+    // Pass (+H hedefi -H) ve undo (+H) — ikisi de velocity taşır.
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+    expect(swipeCardSrc).toMatch(/shouldCommitPass\(y, vy\)/);
+    expect(swipeCardSrc).toMatch(/shouldCommitUndo\(y, vy\)/);
   });
 });
 
-describe('deck rest pose', () => {
-  it('öndeki kart opak; arka katmanlar düşük opaklıkta görünür', () => {
-    expect(DECK_OPACITY_BY_DEPTH[0]).toBe(1);
-    expect(DECK_OPACITY_BY_DEPTH[1]).toBeCloseTo(0.6, 5);
-    expect(DECK_OPACITY_BY_DEPTH[2]).toBeCloseTo(0.35, 5);
+describe('overlay cleanup: pass wash gone, undo toast gone, undoPass stays', () => {
+  const swipeCardSrc = fs.readFileSync(
+    path.join(__dirname, '../components/SwipeCard.tsx'),
+    'utf8',
+  );
+  const indexSrc = fs.readFileSync(
+    path.join(__dirname, '../app/(tabs)/index.tsx'),
+    'utf8',
+  );
+  const motionSrc = fs.readFileSync(
+    path.join(__dirname, '../lib/motion.ts'),
+    'utf8',
+  );
+  const themeSrc = fs.readFileSync(
+    path.join(__dirname, '../lib/theme.ts'),
+    'utf8',
+  );
+
+  it('SwipeCard/motion/index have no pass-wash overlay writers', () => {
+    const washResidue =
+      /passWash|passChrome|throwFade|passOverlay|passStamp|passProgress/;
+    expect(swipeCardSrc).not.toMatch(washResidue);
+    expect(motionSrc).not.toMatch(washResidue);
+    expect(indexSrc).not.toMatch(washResidue);
+    expect(themeSrc).not.toMatch(/passWash/);
   });
 
-  it('görünür arka kart hafif küçülür (0.96–0.98)', () => {
-    expect(DECK_SCALE_BY_DEPTH[1]).toBeGreaterThanOrEqual(0.96);
-    expect(DECK_SCALE_BY_DEPTH[1]).toBeLessThanOrEqual(0.98);
-  });
-
-  it('scale basamakları teleport etmeyecek kadar dar', () => {
-    expect(DECK_SCALE_BY_DEPTH[1]).toBeGreaterThanOrEqual(0.96);
-    expect(DECK_SCALE_BY_DEPTH[2]).toBeGreaterThanOrEqual(0.93);
-    expect(DECK_SCALE_BY_DEPTH[0] - DECK_SCALE_BY_DEPTH[1]).toBeLessThanOrEqual(
-      0.04,
-    );
-    expect(DECK_SCALE_BY_DEPTH[1]).toBeCloseTo(0.98, 5);
-    expect(DECK_SCALE_BY_DEPTH[2]).toBeCloseTo(0.96, 5);
-  });
-
-  it('promotion spring overshoot kapatır', () => {
-    expect(DECK_PROMOTE_SPRING.overshootClamping).toBe(true);
+  it('undo toast is gone; ↓ undoPass wiring remains', () => {
+    expect(indexSrc).not.toMatch(/Geri alındı/);
+    expect(indexSrc).not.toMatch(/UNDO_TOAST/);
+    expect(indexSrc).toMatch(/const undoPass = useAppStore/);
+    expect(indexSrc).toMatch(/undoPass\(\)/);
+    expect(indexSrc).toMatch(/onUndoPass=\{handleUndoPass\}/);
+    expect(swipeCardSrc).toMatch(/shouldCommitUndo\(y, vy\)/);
+    expect(swipeCardSrc).toMatch(/runOnJS\(handleUndoPass\)\(\)/);
   });
 });

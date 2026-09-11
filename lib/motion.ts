@@ -106,15 +106,6 @@ export const getUndoParkY = (cardHeightPx: number): number =>
 export const lerp = (from: number, to: number, progress: number): number =>
   from + (to - from) * progress;
 
-/** Yukarı sürükleme oranı: GEÇ damgası ve arka kartın öne gelişi bunu izler. */
-export const passProgress = (translationY: number): number => {
-  'worklet';
-  if (translationY >= 0) {
-    return 0;
-  }
-  return Math.min(-translationY / PASS_DISTANCE_PX, 1);
-};
-
 /**
  * Park eden kartın desteye dönüş oranı. Ön kart aynı oranla arka slota iner,
  * böylece iki hareket tek fiziksel devir gibi okunur.

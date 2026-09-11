@@ -1,19 +1,26 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import {
+  StyleSheet,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
+  type LayoutChangeEvent,
+} from 'react-native';
+import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Search, SlidersHorizontal } from 'lucide-react-native';
-import Animated, {
-  interpolate,
-  useAnimatedStyle,
+import {
+  runOnUI,
   useSharedValue,
-  withSpring,
   type SharedValue,
 } from 'react-native-reanimated';
 import FeedModeSegment from '../../components/FeedModeSegment';
 import SwipeCard, {
   SWIPE_CARD_HEIGHT,
   SWIPE_CARD_WIDTH,
+  type PageIndex,
 } from '../../components/SwipeCard';
 import PressableScale from '../../components/PressableScale';
 import FilterSheet from '../../components/FilterSheet';
@@ -25,21 +32,11 @@ import { useAuthContext } from '../../hooks/useAuthContext';
 import { logger } from '../../lib/logger';
 import { track, trackFeedImpression } from '../../lib/analytics';
 import { setSessionFilters, setSessionQuery } from '../../lib/sessionIntent';
-import {
-  DECK_PROMOTE_SPRING,
-  DECK_VISIBLE_COUNT,
-  deckClearTravelPx,
-  getStackPose,
-  getUndoParkY,
-  lerp,
-  passProgress,
-  undoReturnProgress,
-} from '../../lib/motion';
 import { hasSeenSwipeHint, markSwipeHintSeen } from '../../lib/onboarding';
 import {
   colors,
-  deckPeekStepForHeight,
   discoverCardLiftForHeight,
+  estimateDiscoverCardHeight,
   headerToDeckForHeight,
   layout,
   radius,
@@ -59,7 +56,6 @@ import type { Product } from '../../types/product';
 import type { FeedMode } from '../../types/recommendation';
 
 const TOAST_DURATION_MS = 1600;
-const UNDO_TOAST_DURATION_MS = 1200;
 const FILTER_HIT_SIZE = 40;
 const SEARCH_DIVIDER_HEIGHT = 24;
 const SEARCH_TRACK_DEBOUNCE_MS = 500;
@@ -68,36 +64,9 @@ const HEADER_Z_INDEX = 7;
 
 type HintStatus = 'checking' | 'visible' | 'hidden';
 
-/** Aynı fizik: kart ya destede, ya clip üstünde park etmiş, ya da uçmakta. */
-type DeckRole = 'stack' | 'peek' | 'exiting';
-
-interface DeckSlot {
+interface DeckPage {
   product: Product;
-  depth: number;
-  role: DeckRole;
-}
-
-/** Tüm slotlar aynı kart çerçevesini paylaşır; poz peekStep ile hesaplanır. */
-const UNDO_PARK_Y = getUndoParkY(SWIPE_CARD_HEIGHT);
-const UNDO_RETURN_TRAVEL_PX = deckClearTravelPx(SWIPE_CARD_HEIGHT);
-
-interface StackSlotProps {
-  product: Product;
-  depth: number;
-  role: DeckRole;
-  isTop: boolean;
-  canLike: boolean;
-  canUndo: boolean;
-  peekStepPx: number;
-  deckPullY: SharedValue<number>;
-  onAddToCloset: (product: Product) => void;
-  onPass: (product: Product) => void;
-  onPassExitSettled: (product: Product) => void;
-  onVirtualTryOn: (product: Product) => void;
-  onBuy: (product: Product) => void;
-  onUndoPass: () => void;
-  onRequireAuth: () => void;
-  onImpression: (product: Product, dwellMs: number) => void;
+  pageIndex: PageIndex;
 }
 
 function LoadingFeed() {
@@ -151,267 +120,12 @@ function DeckFinishedCard({
   );
 }
 
-function StackSlot({
-  product,
-  depth,
-  role,
-  isTop,
-  canLike,
-  canUndo,
-  peekStepPx,
-  deckPullY,
-  onAddToCloset,
-  onPass,
-  onPassExitSettled,
-  onVirtualTryOn,
-  onBuy,
-  onUndoPass,
-  onRequireAuth,
-  onImpression,
-}: StackSlotProps) {
-  const isPeek = role === 'peek';
-  const isExiting = role === 'exiting';
-  const initialPose = getStackPose(depth, SWIPE_CARD_HEIGHT, peekStepPx);
-  const scale = useSharedValue(initialPose.scale);
-  const translateY = useSharedValue(initialPose.translateY);
-  const opacity = useSharedValue(initialPose.opacity);
-  /** Park → ön kart devri: kartın bıraktığı yerden desteye iniş. */
-  const returnY = useSharedValue(0);
-  const wasPeek = useRef(isPeek);
-  const previousDepth = useRef(depth);
-  const frontPose = getStackPose(0, SWIPE_CARD_HEIGHT, peekStepPx);
-  const behindPose = getStackPose(1, SWIPE_CARD_HEIGHT, peekStepPx);
-  const buriedPose = getStackPose(2, SWIPE_CARD_HEIGHT, peekStepPx);
-  const frontScale = frontPose.scale;
-  const frontTranslateY = frontPose.translateY;
-  const frontOpacity = frontPose.opacity;
-  const behindScale = behindPose.scale;
-  const behindTranslateY = behindPose.translateY;
-  const behindOpacity = behindPose.opacity;
-  const buriedScale = buriedPose.scale;
-  const buriedTranslateY = buriedPose.translateY;
-  const buriedOpacity = buriedPose.opacity;
-  const undoParkY = UNDO_PARK_Y;
-
-  useLayoutEffect(() => {
-    if (isPeek || isExiting) {
-      wasPeek.current = isPeek;
-      previousDepth.current = depth;
-      return;
-    }
-    const pose = getStackPose(depth, SWIPE_CARD_HEIGHT, peekStepPx);
-    if (wasPeek.current) {
-      // Undo settle'da kart zaten ön pozda. Park Y'den spring-in, clip üstünden
-      // bir kare flash olarak düşer.
-      returnY.value = 0;
-      scale.value = frontScale;
-      translateY.value = frontTranslateY;
-      opacity.value = frontOpacity;
-    }
-    if (depth === 0 && previousDepth.current === 1) {
-      // Pass sırasında bu kart zaten öne doğru interpolate edilmişti.
-      const lift = passProgress(deckPullY.value);
-      if (lift > 0) {
-        scale.value = lerp(behindScale, frontScale, lift);
-        translateY.value = lerp(behindTranslateY, frontTranslateY, lift);
-        opacity.value = lerp(behindOpacity, frontOpacity, lift);
-      }
-    }
-    if (depth === 1 && previousDepth.current === 2) {
-      const lift = passProgress(deckPullY.value);
-      if (lift > 0) {
-        scale.value = lerp(buriedScale, behindScale, lift);
-        translateY.value = lerp(buriedTranslateY, behindTranslateY, lift);
-        opacity.value = lerp(buriedOpacity, behindOpacity, lift);
-      }
-    }
-    if (depth === 1 && previousDepth.current === 0) {
-      // Undo commit'inde iniş tamamlanmıştı; spring hedefi zaten burası.
-      scale.value = behindScale;
-      translateY.value = behindTranslateY;
-      opacity.value = behindOpacity;
-    }
-    if (depth === 2 && previousDepth.current === 1) {
-      scale.value = buriedScale;
-      translateY.value = buriedTranslateY;
-      opacity.value = buriedOpacity;
-    }
-    wasPeek.current = false;
-    previousDepth.current = depth;
-    scale.value = withSpring(pose.scale, DECK_PROMOTE_SPRING);
-    translateY.value = withSpring(pose.translateY, DECK_PROMOTE_SPRING);
-    opacity.value = withSpring(pose.opacity, DECK_PROMOTE_SPRING);
-  }, [
-    behindOpacity,
-    behindScale,
-    behindTranslateY,
-    buriedOpacity,
-    buriedScale,
-    buriedTranslateY,
-    deckPullY,
-    depth,
-    frontOpacity,
-    frontScale,
-    frontTranslateY,
-    isExiting,
-    isPeek,
-    opacity,
-    peekStepPx,
-    returnY,
-    scale,
-    translateY,
-  ]);
-
-  /**
-   * deckPullY işareti rolleri ayırır: negatif (yukarı) yalnız arka kartı öne
-   * çeker, pozitif (aşağı) yalnız ön kartı arka slota indirir. Böylece rol
-   * devrinde iki interpolasyon birbirine karışmaz.
-   */
-  const stackOuterStyle = useAnimatedStyle(() => {
-    if (isExiting) {
-      return {
-        opacity: frontOpacity,
-        transform: [{ translateY: 0 }, { scale: frontScale }],
-      };
-    }
-    if (isPeek) {
-      return {
-        opacity: frontOpacity,
-        transform: [
-          { translateY: undoParkY + Math.max(deckPullY.value, 0) },
-          { scale: frontScale },
-        ],
-      };
-    }
-    if (depth === 0) {
-      const sink = undoReturnProgress(deckPullY.value, UNDO_RETURN_TRAVEL_PX);
-      return {
-        opacity: opacity.value,
-        transform: [
-          {
-            translateY:
-              returnY.value +
-              interpolate(sink, [0, 1], [translateY.value, behindTranslateY]),
-          },
-          { scale: interpolate(sink, [0, 1], [scale.value, behindScale]) },
-        ],
-      };
-    }
-    if (depth === 1) {
-      const lift = passProgress(deckPullY.value);
-      const sink = undoReturnProgress(deckPullY.value, UNDO_RETURN_TRAVEL_PX);
-      if (sink > 0) {
-        return {
-          opacity: interpolate(sink, [0, 1], [opacity.value, buriedOpacity]),
-          transform: [
-            {
-              translateY:
-                returnY.value +
-                interpolate(sink, [0, 1], [translateY.value, buriedTranslateY]),
-            },
-            { scale: interpolate(sink, [0, 1], [scale.value, buriedScale]) },
-          ],
-        };
-      }
-      return {
-        opacity: interpolate(lift, [0, 1], [opacity.value, frontOpacity]),
-        transform: [
-          {
-            translateY:
-              returnY.value +
-              interpolate(lift, [0, 1], [translateY.value, frontTranslateY]),
-          },
-          { scale: interpolate(lift, [0, 1], [scale.value, frontScale]) },
-        ],
-      };
-    }
-    const lift = passProgress(deckPullY.value);
-    return {
-      opacity: interpolate(lift, [0, 1], [opacity.value, behindOpacity]),
-      transform: [
-        {
-          translateY:
-            returnY.value +
-            interpolate(lift, [0, 1], [translateY.value, behindTranslateY]),
-        },
-        { scale: interpolate(lift, [0, 1], [scale.value, behindScale]) },
-      ],
-    };
-  });
-
-  /**
-   * Park kartı idle’da aktif kartın üstünden taşmasın: görünür pencere
-   * yalnız aşağı çekiş kadar açılır (undo 1:1). Transform clip kaçışına
-   * karşı layout `top` + overflow hidden.
-   */
-  const peekRevealStyle = useAnimatedStyle(() => ({
-    height: Math.max(deckPullY.value, 0),
-  }));
-  const peekInnerStyle = useAnimatedStyle(() => ({
-    top: undoParkY + Math.max(deckPullY.value, 0),
-  }));
-
-  const card = (
-    <SwipeCard
-      product={product}
-      isInteractive={isTop}
-      isExiting={isExiting}
-      canLike={canLike}
-      canUndo={canUndo}
-      castShadow={role !== 'peek'}
-      deckPullY={isTop ? deckPullY : undefined}
-      onAddToCloset={onAddToCloset}
-      onPass={onPass}
-      onPassExitSettled={onPassExitSettled}
-      onVirtualTryOn={onVirtualTryOn}
-      onBuy={onBuy}
-      onUndoPass={onUndoPass}
-      onRequireAuth={onRequireAuth}
-      onImpression={isTop ? onImpression : undefined}
-    />
-  );
-
-  if (isPeek) {
-    return (
-      <Animated.View
-        pointerEvents="none"
-        collapsable={false}
-        style={[styles.peekReveal, peekRevealStyle]}
-      >
-        <Animated.View style={[styles.peekRevealInner, peekInnerStyle]}>
-          {card}
-        </Animated.View>
-      </Animated.View>
-    );
-  }
-
-  return (
-    <View
-      pointerEvents={isTop ? 'auto' : 'none'}
-      style={[
-        styles.stackSlot,
-        {
-          zIndex: isExiting
-            ? DECK_VISIBLE_COUNT + 2
-            : DECK_VISIBLE_COUNT - depth,
-        },
-      ]}
-    >
-      <Animated.View style={[styles.cardFill, stackOuterStyle]}>
-        {card}
-      </Animated.View>
-    </View>
-  );
-}
-
 export default function FeedScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const headerToDeckPx = headerToDeckForHeight(windowHeight);
   const discoverCardLiftPx = discoverCardLiftForHeight(windowHeight);
-  const peekStepPx = deckPeekStepForHeight(windowHeight);
-  const peekBandPx = peekStepPx * (DECK_VISIBLE_COUNT - 1);
   const { user } = useAuthContext();
   const currentProducts = useAppStore((state) => state.currentProducts);
   const feedStatus = useAppStore((state) => state.feedStatus);
@@ -428,13 +142,36 @@ export default function FeedScreen() {
     const stack = state.passedStack;
     return stack[stack.length - 1] ?? null;
   });
-  const [exitingProducts, setExitingProducts] = useState<Product[]>([]);
-  const deckPullY = useSharedValue(0);
+
+
+  const estimatedH = estimateDiscoverCardHeight(windowHeight);
+  const pageHeight = useSharedValue(estimatedH);
+  const dragOffset = useSharedValue(0);
   const topProductId = currentProducts[0]?.id ?? null;
 
-  useLayoutEffect(() => {
-    deckPullY.value = 0;
-  }, [deckPullY, topProductId]);
+  const prevTopIdRef = useRef<string | null>(null);
+  const pageIndexSVByIdRef = useRef(new Map<string, SharedValue<number>>());
+
+  const registerPageIndexSV = useCallback(
+    (productId: string, sv: SharedValue<number>): void => {
+      pageIndexSVByIdRef.current.set(productId, sv);
+    },
+    [],
+  );
+
+  const unregisterPageIndexSV = useCallback((productId: string): void => {
+    pageIndexSVByIdRef.current.delete(productId);
+  }, []);
+
+  const handleDeckLayout = useCallback(
+    (event: LayoutChangeEvent): void => {
+      const nextH = event.nativeEvent.layout.height;
+      if (nextH > 0) {
+        pageHeight.value = nextH;
+      }
+    },
+    [pageHeight],
+  );
 
   const userId = user?.id ?? null;
   const canLike = user !== null;
@@ -457,6 +194,21 @@ export default function FeedScreen() {
   useEffect(() => {
     reloadFeed();
   }, [reloadFeed]);
+
+  const prefetchCurrentUrl = currentProducts[0]?.imageUrl;
+  const prefetchNextUrl = currentProducts[1]?.imageUrl;
+  const prefetchThirdUrl = currentProducts[2]?.imageUrl;
+
+  // Prefetch current + next + third card images so ↑ reveals a warm cache (no hard pop).
+  useEffect(() => {
+    const urls = [prefetchCurrentUrl, prefetchNextUrl, prefetchThirdUrl].filter(
+      (url): url is string => typeof url === 'string' && url.length > 0,
+    );
+    if (urls.length === 0) {
+      return;
+    }
+    void Image.prefetch(urls);
+  }, [prefetchCurrentUrl, prefetchNextUrl, prefetchThirdUrl]);
 
   const handleRequireAuth = useCallback((): void => {
     router.push('/profile');
@@ -481,32 +233,17 @@ export default function FeedScreen() {
     [canLike, handleRequireAuth, swipeRight],
   );
 
+  /** Store commit yalnız gesture settle sonrası (SwipeCard onPass). */
   const handleSwipeLeft = useCallback(
     (product: Product): void => {
       try {
-        setExitingProducts((prev) =>
-          prev.some((item) => item.id === product.id)
-            ? prev
-            : [...prev, product],
-        );
         swipeLeft(product);
       } catch (error) {
         logger.error('Geçme işlenemedi', { error, productId: product.id });
-        setExitingProducts((prev) =>
-          prev.filter((item) => item.id !== product.id),
-        );
       }
     },
     [swipeLeft],
   );
-
-  const handlePassExitSettled = useCallback((product: Product): void => {
-    setExitingProducts((prev) =>
-      prev.some((item) => item.id === product.id)
-        ? prev.filter((item) => item.id !== product.id)
-        : prev,
-    );
-  }, []);
 
   const [tryOnProduct, setTryOnProduct] = useState<Product | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -516,12 +253,17 @@ export default function FeedScreen() {
   const [filters, setFilters] = useState<ProductFilters>({});
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const currentProductsRef = useRef(currentProducts);
+  currentProductsRef.current = currentProducts;
+
   const handleImpression = useCallback(
     (product: Product, dwellMs: number): void => {
-      const position = currentProducts.findIndex((item) => item.id === product.id);
+      const position = currentProductsRef.current.findIndex(
+        (item) => item.id === product.id,
+      );
       trackFeedImpression(product.id, Math.max(position, 0), dwellMs);
     },
-    [currentProducts],
+    [],
   );
 
   const handleApplyFilters = useCallback(
@@ -560,19 +302,16 @@ export default function FeedScreen() {
     void markSwipeHintSeen();
   }, []);
 
-  const showToast = useCallback(
-    (message: string, durationMs: number = TOAST_DURATION_MS): void => {
-      if (toastTimeoutRef.current !== null) {
-        clearTimeout(toastTimeoutRef.current);
-      }
-      setToastMessage(message);
-      toastTimeoutRef.current = setTimeout(() => {
-        setToastMessage(null);
-        toastTimeoutRef.current = null;
-      }, durationMs);
-    },
-    [],
-  );
+  const showToast = useCallback((message: string): void => {
+    if (toastTimeoutRef.current !== null) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    setToastMessage(message);
+    toastTimeoutRef.current = setTimeout(() => {
+      setToastMessage(null);
+      toastTimeoutRef.current = null;
+    }, TOAST_DURATION_MS);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -599,61 +338,85 @@ export default function FeedScreen() {
   );
 
   const handleUndoPass = useCallback((): void => {
-    const restoring = lastPassed;
-    // Park eden kart yerine oturdu: rol devrinden önce çekiş sıfırlanır, böylece
-    // öne geçen kart tek kare bile arka poza düşmez.
-    deckPullY.value = 0;
-    const restored = undoPass();
-    if (!restored || restoring === null) {
-      return;
-    }
-    setExitingProducts((prev) =>
-      prev.filter((item) => item.id !== restoring.id),
-    );
-    showToast('Geri alındı', UNDO_TOAST_DURATION_MS);
-  }, [deckPullY, lastPassed, showToast, undoPass]);
-
-  const peekProduct =
-    lastPassed !== null &&
-    lastPassed.id !== currentProducts[0]?.id &&
-    !exitingProducts.some((item) => item.id === lastPassed.id)
-      ? lastPassed
-      : null;
-  const visibleSlots = useMemo(
-    () =>
-      currentProducts
-        .slice(0, DECK_VISIBLE_COUNT)
-        .map((product, depth) => ({ product, depth }))
-        .reverse(),
-    [currentProducts],
-  );
+    undoPass();
+  }, [undoPass]);
 
   /**
-   * Deste, uçan ve peek kartlar dahil TEK keyed liste: rol değişimi (top → exiting,
-   * peek → top) React'te remount değil, prop güncellemesi olur. Ayrı children
-   * dizileri kullanılırsa aynı key eşleşmez ve süren çıkış animasyonu kaybolur.
+   * Reels penceresi: prev=-1, current=0, next=1, warm-up=+2 (queue[2], ekran dışı +2H).
+   * Prev yoksa mount edilmez. Stack/peek/park yok.
    */
-  const deckSlots = useMemo<DeckSlot[]>(() => {
-    const slots: DeckSlot[] = visibleSlots.map(({ product, depth }) => ({
-      product,
-      depth,
-      role: 'stack',
-    }));
-    if (peekProduct !== null) {
-      slots.push({ product: peekProduct, depth: 0, role: 'peek' });
-    }
-    for (const product of exitingProducts) {
-      if (slots.some((slot) => slot.product.id === product.id)) {
-        continue;
-      }
-      slots.push({ product, depth: 0, role: 'exiting' });
-    }
-    return slots;
-  }, [exitingProducts, peekProduct, visibleSlots]);
+  const deckPages = useMemo<DeckPage[]>(() => {
+    const pages: DeckPage[] = [];
+    const current = currentProducts[0];
+    const next = currentProducts[1];
+    const warm = currentProducts[2];
 
-  // Katalogda ürün var ama hepsi beğenildi/geçildi: tekrar yüklemek işe yaramaz,
-  // kullanıcıya yeni ürünlerden haberdar olma yolunu göster.
-  const isCatalogExhausted = visibleSlots.length === 0 && seenCount > 0;
+    if (
+      lastPassed !== null &&
+      current !== undefined &&
+      lastPassed.id !== current.id &&
+      (next === undefined || lastPassed.id !== next.id) &&
+      (warm === undefined || lastPassed.id !== warm.id)
+    ) {
+      pages.push({ product: lastPassed, pageIndex: -1 });
+    }
+    if (current !== undefined) {
+      pages.push({ product: current, pageIndex: 0 });
+    }
+    if (next !== undefined) {
+      pages.push({ product: next, pageIndex: 1 });
+    }
+    if (warm !== undefined) {
+      pages.push({ product: warm, pageIndex: 2 });
+    }
+    return pages;
+  }, [currentProducts, lastPassed]);
+
+  const deckPoseKey = deckPages
+    .map((p) => `${p.product.id}:${p.pageIndex}`)
+    .join('|');
+
+  // Atomic pose batch: ALL pageIndexSVs + dragOffset in ONE runOnUI tick.
+  // Pass: drag≈-H → +=H; Undo: drag≈+H → -=H. First mount still syncs SVs.
+  useLayoutEffect(() => {
+    const prev = prevTopIdRef.current;
+    const isFirst = prev === null;
+    prevTopIdRef.current = topProductId;
+
+    const H = pageHeight.value > 0 ? pageHeight.value : estimatedH;
+    let nextDrag = dragOffset.value;
+    if (!isFirst && topProductId !== null && prev !== topProductId) {
+      const d = dragOffset.value;
+      if (d < -H / 2) {
+        nextDrag = d + H;
+      } else if (d > H / 2) {
+        nextDrag = d - H;
+      } else {
+        nextDrag = 0;
+      }
+    }
+
+    const updates: { sv: SharedValue<number>; pageIndex: number }[] = [];
+    for (const page of deckPages) {
+      const sv = pageIndexSVByIdRef.current.get(page.product.id);
+      if (sv !== undefined) {
+        updates.push({ sv, pageIndex: page.pageIndex });
+      }
+    }
+
+    runOnUI(() => {
+      'worklet';
+      for (let i = 0; i < updates.length; i++) {
+        const u = updates[i];
+        u.sv.value = u.pageIndex;
+      }
+      dragOffset.value = nextDrag;
+    })();
+  }, [topProductId, deckPoseKey, estimatedH, deckPages, dragOffset, pageHeight]);
+
+  const hasDeck = currentProducts.length > 0;
+  // Katalogda ürün var ama hepsi beğenildi/geçildi: tekrar yüklemek işe yaramaz.
+  const isCatalogExhausted = !hasDeck && seenCount > 0;
   const isLoading = feedStatus === 'loading' || feedStatus === 'idle';
   const isSearching = searchQuery.trim().length > 0;
   const activeFilterCount = [filters.category, filters.gender, filters.size]
@@ -749,13 +512,13 @@ export default function FeedScreen() {
           </View>
         ) : isLoading ? (
           <LoadingFeed />
-        ) : isCatalogExhausted && exitingProducts.length === 0 ? (
+        ) : isCatalogExhausted ? (
           <DeckFinishedCard
             subtitle="Katalogdaki her şeyi gördün. Yeni ürünler eklendikçe burada belirir."
             onRefresh={reloadFeed}
             onOpenLiked={handleOpenLiked}
           />
-        ) : visibleSlots.length === 0 && exitingProducts.length === 0 ? (
+        ) : !hasDeck ? (
           <DeckFinishedCard
             subtitle="Beğendiğin parçalar dolabına eklendi. Yeni öneriler yakında."
             onRefresh={reloadFeed}
@@ -763,27 +526,24 @@ export default function FeedScreen() {
           />
         ) : (
           <View
-            style={[
-              styles.deckClip,
-              { marginBottom: -peekBandPx, paddingBottom: peekBandPx },
-            ]}
+            style={styles.deckClip}
             collapsable={false}
+            onLayout={handleDeckLayout}
           >
             <View style={styles.deck}>
-              {deckSlots.map(({ product, depth, role }) => (
-                <StackSlot
+              {deckPages.map(({ product, pageIndex }) => (
+                <SwipeCard
                   key={product.id}
                   product={product}
-                  depth={depth}
-                  role={role}
-                  isTop={role === 'stack' && depth === 0}
+                  pageIndex={pageIndex}
+                  pageHeight={pageHeight}
+                  dragOffset={dragOffset}
+                  registerPageIndexSV={registerPageIndexSV}
+                  unregisterPageIndexSV={unregisterPageIndexSV}
                   canLike={canLike}
                   canUndo={lastPassed !== null}
-                  peekStepPx={peekStepPx}
-                  deckPullY={deckPullY}
                   onAddToCloset={handleSwipeRight}
                   onPass={handleSwipeLeft}
-                  onPassExitSettled={handlePassExitSettled}
                   onVirtualTryOn={handleVirtualTryOn}
                   onBuy={handleBuy}
                   onUndoPass={handleUndoPass}
@@ -798,7 +558,7 @@ export default function FeedScreen() {
       {hintStatus === 'visible' &&
       !isLoading &&
       !isSearching &&
-      visibleSlots.length > 0 ? (
+      hasDeck ? (
         <SwipeHintOverlay onDismiss={handleDismissHint} />
       ) : null}
       <FilterSheet
@@ -900,51 +660,20 @@ const styles = StyleSheet.create({
     flex: 1,
     alignSelf: 'stretch',
   },
-  /**
-   * Clip üst kenarı = deck top. Padding/negatif margin yok; park kartı
-   * header/segment aralığına sızamaz.
-   */
+  /** Reels viewport: H = onLayout; offscreen pages clip dışında. Peek band yok. */
+  // Prevent container bg bleed through card radius during pager transition
   deckClip: {
     flex: 1,
     overflow: 'hidden',
     marginHorizontal: -spacing.lg,
     paddingHorizontal: spacing.lg,
-    marginBottom: -layout.deckPadding,
-    paddingBottom: layout.deckPadding,
+    backgroundColor: colors.surface,
   },
   deck: {
     flex: 1,
     width: '100%',
-    overflow: 'visible',
-    justifyContent: 'center',
-  },
-  stackSlot: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-  },
-  /**
-   * Idle yükseklik 0: park kartı aktif kartın üst kenarına binemez.
-   * Aşağı çekişte pencere 1:1 açılır.
-   */
-  peekReveal: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
     overflow: 'hidden',
-    zIndex: DECK_VISIBLE_COUNT + 1,
-  },
-  peekRevealInner: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    height: SWIPE_CARD_HEIGHT,
-  },
-  cardFill: {
-    ...StyleSheet.absoluteFillObject,
+    backgroundColor: colors.surface,
   },
   emptyState: {
     alignItems: 'center',

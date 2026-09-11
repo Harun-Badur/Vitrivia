@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
-import { Dimensions, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Dimensions,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { Image } from 'expo-image';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
@@ -14,7 +20,7 @@ import Animated, {
   withTiming,
   type SharedValue,
 } from 'react-native-reanimated';
-import { Heart, ShoppingBag, Sparkles, X } from 'lucide-react-native';
+import { Heart, ShoppingBag, Sparkles } from 'lucide-react-native';
 import PressableScale from './PressableScale';
 import { hapticPurchaseIntent, hapticSwipeDecision } from '../lib/haptics';
 import { logger } from '../lib/logger';
@@ -23,9 +29,6 @@ import {
   CARD_THROW_SPRING,
   PAN_ACTIVE_OFFSET_Y_PX,
   PAN_FAIL_OFFSET_X_PX,
-  UNDO_SETTLE_SPRING,
-  deckClearTravelPx,
-  passProgress,
   shouldCommitPass,
   shouldCommitUndo,
 } from '../lib/motion';
@@ -54,87 +57,120 @@ const DOUBLE_TAP_MAX_DURATION_MS = 280;
 const HEART_BURST_IN_MS = 160;
 const HEART_BURST_OUT_MS = 260;
 const HEART_BURST_PEAK_SCALE = 1.18;
-/** 0: slot reuse/reconcile sırasında expo-image crossfade flash'ini engeller. */
+/** Soft crossfade when bitmap arrives; pairs with surface placeholder (no white flash). */
 const IMAGE_CROSSFADE_MS = 0;
 const ACTION_ICON_SIZE = 16;
 const REASON_ICON_SIZE = 12;
 /** object-position: top-center — tam boy kadraj (hedef oran ~0.68). */
 const IMAGE_CONTENT_POSITION = { top: 0, left: '50%' } as const;
 
+/** Ekran kökünün 16px yatay padding’iyle aynı grid; ekstra inset yok. */
+const CARD_WIDTH = SCREEN_WIDTH - spacing.lg * 2;
+const CARD_HEIGHT = estimateDiscoverCardHeight(SCREEN_HEIGHT);
+
 export type { Product };
+
+/** Sayfa indeksi: -1 = prev, 0 = current, +1 = next. */
+export type PageIndex = -1 | 0 | 1 | 2;
 
 export interface SwipeCardProps {
   product: Product;
+  /** Relatif sayfa: -1 prev, 0 current, +1 next, +2 warm-up. */
+  pageIndex: PageIndex;
+  /** Deck onLayout ile ölçülen viewport yüksekliği H. */
+  pageHeight: SharedValue<number>;
+  /** Ortak sürükleme ofseti; commit sonrası parent 0'a baslar. */
+  dragOffset: SharedValue<number>;
   onAddToCloset: (product: Product) => void;
+  /** Pass throw settle sonrası tek store reconcile. */
   onPass: (product: Product) => void;
-  onPassExitSettled?: (product: Product) => void;
   onVirtualTryOn: (product: Product) => void;
   onBuy: (product: Product) => void;
+  /** Undo settle sonrası tek store reconcile. */
   onUndoPass?: () => void;
   onRequireAuth?: () => void;
-  onImpression?: (product: Product, dwellMs: number) => void;
-  isInteractive?: boolean;
-  isExiting?: boolean;
+  onImpression: (product: Product, dwellMs: number) => void;
   canLike?: boolean;
   canUndo?: boolean;
-  /** Park/çıkış kartında elevation clip dışına taşmasın. */
-  castShadow?: boolean;
-  deckPullY?: SharedValue<number>;
+  /** Parent registry fill (render-time) for atomic pose batch. */
+  registerPageIndexSV?: (productId: string, sv: SharedValue<number>) => void;
+  /** Parent registry delete on unmount. */
+  unregisterPageIndexSV?: (productId: string) => void;
 }
 
 const formatPrice = (product: Product): string =>
   formatTryPrice(getDisplayPrice(product));
 
-export default function SwipeCard({
+function SwipeCard({
   product,
+  pageIndex,
+  pageHeight,
+  dragOffset,
   onAddToCloset,
   onPass,
-  onPassExitSettled,
   onVirtualTryOn,
   onBuy,
   onUndoPass,
   onRequireAuth,
   onImpression,
-  isInteractive = true,
-  isExiting = false,
   canLike = true,
   canUndo = false,
-  castShadow = true,
-  deckPullY,
+  registerPageIndexSV,
+  unregisterPageIndexSV,
 }: SwipeCardProps) {
-  const [hasImageError, setHasImageError] = useState(false);
 
-  const translateY = useSharedValue(0);
-  const cardScale = useSharedValue(1);
+  const isCurrent = pageIndex === 0;
+  /** Pose slot index — parent atomically writes on deck remap; do not sync from React. */
+  const pageIndexSV = useSharedValue<number>(pageIndex);
+  // Register during render so parent useLayoutEffect sees SVs before paint.
+  registerPageIndexSV?.(product.id, pageIndexSV);
+  const [hasImageError, setHasImageError] = useState(false);
+  const [isImageLoading, setIsImageLoading] = useState(true);
+  const imageCachedRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    imageCachedRef.current = false;
+    setHasImageError(false);
+    setIsImageLoading(true);
+    // Prefetch/cache hit: onLoad gelmeden spinner'ı kapat.
+    void Image.getCachePathAsync(product.imageUrl).then((cachedPath) => {
+      if (!cancelled && cachedPath) {
+        imageCachedRef.current = true;
+        setIsImageLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [product.id, product.imageUrl]);
+
+  useEffect(() => {
+    const id = product.id;
+    return () => {
+      unregisterPageIndexSV?.(id);
+    };
+  }, [product.id, unregisterPageIndexSV]);
+
   const hasExited = useSharedValue(false);
   const heartBurst = useSharedValue(0);
 
   useEffect(
     () => () => {
-      cancelAnimation(translateY);
-      cancelAnimation(cardScale);
       cancelAnimation(heartBurst);
     },
-    [cardScale, heartBurst, translateY],
+    [heartBurst],
   );
 
+  // Store settle / page rollover: current tekrar etkileşime açık olsun.
   useLayoutEffect(() => {
-    if (isExiting) {
-      return;
+    if (isCurrent) {
+      hasExited.value = false;
     }
-    if (isInteractive) {
-      if (hasExited.value) {
-        hasExited.value = false;
-        translateY.value = withSpring(0, CARD_SPRING_BACK);
-      }
-      return;
-    }
-    // Peek/arka slot: çıkış yolunu dış sargı taşır; iç offset boyayıp double-park yapmasın.
-    translateY.value = 0;
-  }, [hasExited, isExiting, isInteractive, translateY]);
+  }, [hasExited, isCurrent, product.id]);
 
   useEffect(() => {
-    if (!isInteractive || !onImpression) {
+    if (!isCurrent) {
       return;
     }
 
@@ -157,7 +193,7 @@ export default function SwipeCard({
       clearTimeout(timeoutId);
       fire();
     };
-  }, [isInteractive, onImpression, product]);
+  }, [isCurrent, onImpression, product]);
 
   const handleAddToCloset = useCallback((): void => {
     try {
@@ -232,43 +268,22 @@ export default function SwipeCard({
 
   const snapHome = (): void => {
     'worklet';
-    translateY.value = withSpring(0, CARD_SPRING_BACK);
-    if (deckPullY) {
-      deckPullY.value = withSpring(0, CARD_SPRING_BACK);
-    }
+    dragOffset.value = withSpring(0, CARD_SPRING_BACK);
   };
 
-  const commitPass = useCallback((): void => {
-    handlePass();
-  }, [handlePass]);
-
-  const notifyPassExitSettled = useCallback((): void => {
-    onPassExitSettled?.(product);
-  }, [onPassExitSettled, product]);
-
-  const commitUndo = useCallback((): void => {
-    handleUndoPass();
-    translateY.value = 0;
-  }, [handleUndoPass, translateY]);
-
   /**
-   * Y eksenine kilitli: yatay/çapraz sürüklemede pan hiç aktive olmaz, kart
-   * kıpırdamaz. Aşağı çekişte ön kart yerinde durur; parmağı takip eden kart
-   * clip üstünde park eden geçilmiş karttır (deckPullY üzerinden).
+   * Y eksenine kilitli Reels pager: translateY = pageIndexSV * H + dragOffset.
+   * Yatay/çapraz sürüklemede pan hiç aktive olmaz.
    */
   const panGesture = Gesture.Pan()
-    .enabled(isInteractive)
+    .enabled(isCurrent)
     .activeOffsetY([-PAN_ACTIVE_OFFSET_Y_PX, PAN_ACTIVE_OFFSET_Y_PX])
     .failOffsetX([-PAN_FAIL_OFFSET_X_PX, PAN_FAIL_OFFSET_X_PX])
     .onUpdate((event) => {
       if (hasExited.value) {
         return;
       }
-      const y = event.translationY;
-      if (deckPullY) {
-        deckPullY.value = y < 0 || canUndo ? y : 0;
-      }
-      translateY.value = Math.min(y, 0);
+      dragOffset.value = event.translationY;
     })
     .onEnd((event) => {
       if (hasExited.value) {
@@ -277,16 +292,18 @@ export default function SwipeCard({
 
       const y = event.translationY;
       const vy = event.velocityY;
+      const H = pageHeight.value > 0 ? pageHeight.value : CARD_HEIGHT;
 
       if (shouldCommitPass(y, vy)) {
         hasExited.value = true;
         runOnJS(hapticSwipeDecision)();
-        runOnJS(commitPass)();
-        translateY.value = withSpring(
-          -DECK_CLEAR_TRAVEL_PX,
+        dragOffset.value = withSpring(
+          -H,
           { ...CARD_THROW_SPRING, velocity: vy },
-          () => {
-            runOnJS(notifyPassExitSettled)();
+          (finished) => {
+            if (finished) {
+              runOnJS(handlePass)();
+            }
           },
         );
         return;
@@ -298,22 +315,17 @@ export default function SwipeCard({
           runOnJS(notifyEmptyUndo)();
           return;
         }
+        hasExited.value = true;
         runOnJS(hapticSwipeDecision)();
-        translateY.value = withSpring(0, UNDO_SETTLE_SPRING);
-        if (deckPullY) {
-          // Park eden kart tam dinlenme pozisyonuna oturunca rol devri görünmez olur.
-          deckPullY.value = withSpring(
-            DECK_CLEAR_TRAVEL_PX,
-            { ...UNDO_SETTLE_SPRING, velocity: vy },
-            (finished) => {
-              if (finished) {
-                runOnJS(commitUndo)();
-              }
-            },
-          );
-        } else {
-          runOnJS(commitUndo)();
-        }
+        dragOffset.value = withSpring(
+          H,
+          { ...CARD_THROW_SPRING, velocity: vy },
+          (finished) => {
+            if (finished) {
+              runOnJS(handleUndoPass)();
+            }
+          },
+        );
         return;
       }
 
@@ -337,7 +349,7 @@ export default function SwipeCard({
   };
 
   const doubleTapGesture = Gesture.Tap()
-    .enabled(isInteractive)
+    .enabled(isCurrent)
     .numberOfTaps(2)
     .maxDuration(DOUBLE_TAP_MAX_DURATION_MS)
     .maxDistance(DOUBLE_TAP_MAX_DISTANCE_PX)
@@ -359,25 +371,12 @@ export default function SwipeCard({
     panGesture,
   );
 
-  const animatedCardStyle = useAnimatedStyle(() => ({
-    opacity: 1,
-    transform: [
-      { translateY: translateY.value },
-      { scale: cardScale.value },
-    ],
-  }));
-
-  const passOverlayStyle = useAnimatedStyle(() => {
-    const progress = passProgress(translateY.value);
+  const animatedCardStyle = useAnimatedStyle(() => {
+    const H = pageHeight.value > 0 ? pageHeight.value : CARD_HEIGHT;
     return {
-      opacity: progress,
-      transform: [{ scale: 0.86 + 0.14 * progress }],
+      transform: [{ translateY: pageIndexSV.value * H + dragOffset.value }],
     };
   });
-
-  const passWashStyle = useAnimatedStyle(() => ({
-    opacity: passProgress(translateY.value),
-  }));
 
   const heartBurstStyle = useAnimatedStyle(() => ({
     opacity: heartBurst.value,
@@ -393,143 +392,176 @@ export default function SwipeCard({
     ],
   }));
 
+  const imageSource = useMemo(
+    () => ({ uri: product.imageUrl }),
+    [product.imageUrl],
+  );
+
+  const slotTranslateStyle = useMemo(
+    () => ({ transform: [{ translateY: pageIndex * CARD_HEIGHT }] }),
+    [pageIndex],
+  );
+
+  const handleImageLoadStart = useCallback((): void => {
+    if (!imageCachedRef.current) {
+      setIsImageLoading(true);
+    }
+  }, []);
+
+  const handleImageLoad = useCallback((): void => {
+    setIsImageLoading(false);
+  }, []);
+
+  const handleImageError = useCallback((): void => {
+    setHasImageError(true);
+    setIsImageLoading(false);
+  }, []);
+
   const reasonLabel = product.reason?.trim() ?? '';
 
   return (
-    <GestureDetector gesture={cardGesture}>
-      <Animated.View
-        style={[
-          styles.shadowWrap,
-          castShadow ? styles.shadowWrapFront : styles.shadowWrapParked,
-          animatedCardStyle,
-        ]}
-        accessibilityRole="image"
-        accessibilityLabel={`${product.brand} ${product.title}, ${formatPrice(product)}`}
-      >
-        <View style={[styles.card, !isInteractive ? styles.cardBehind : null]}>
-          <View style={styles.imageWrap}>
-            {hasImageError ? (
-              <View style={styles.imageFallback}>
-                <Text style={styles.imageFallbackText}>Görsel yüklenemedi</Text>
-              </View>
-            ) : (
-              <Image
-                source={{ uri: product.imageUrl }}
-                style={styles.image}
-                contentFit="cover"
-                contentPosition={IMAGE_CONTENT_POSITION}
-                cachePolicy="memory-disk"
-                recyclingKey={product.id}
-                transition={IMAGE_CROSSFADE_MS}
-                onError={() => setHasImageError(true)}
-              />
-            )}
+    <Animated.View
+      pointerEvents={isCurrent ? 'auto' : 'none'}
+      collapsable={false}
+      style={[
+        styles.slot,
+        slotTranslateStyle,
+        animatedCardStyle,
+      ]}
+    >
+      <GestureDetector gesture={cardGesture}>
+        <Animated.View
+          style={[styles.shadowWrap, styles.shadowWrapFront]}
+          accessibilityRole="image"
+          accessibilityLabel={`${product.brand} ${product.title}, ${formatPrice(product)}`}
+        >
+          <View style={styles.card}>
+            <View style={styles.imageWrap}>
+              {hasImageError ? (
+                <View style={styles.imageFallback}>
+                  <Text style={styles.imageFallbackText}>Görsel yüklenemedi</Text>
+                </View>
+              ) : (
+                <Image
+                  source={imageSource}
+                  style={styles.image}
+                  contentFit="cover"
+                  contentPosition={IMAGE_CONTENT_POSITION}
+                  cachePolicy="memory-disk"
+                  recyclingKey={product.id}
+                  transition={IMAGE_CROSSFADE_MS}
+                  priority={pageIndex === 0 || pageIndex === 1 || pageIndex === 2 ? 'high' : 'low'}
+                  onLoadStart={handleImageLoadStart}
+                  onLoad={handleImageLoad}
+                  onError={handleImageError}
+                />
+              )}
 
-            <Animated.View
-              pointerEvents="none"
-              style={[styles.wash, styles.passWash, passWashStyle]}
-            />
-
-            <Animated.View
-              pointerEvents="none"
-              style={[styles.stamp, styles.passStamp, passOverlayStyle]}
-            >
-              <X color={colors.stampPass} size={28} strokeWidth={3} />
-              <Text style={styles.passStampText}>GEÇ</Text>
-            </Animated.View>
-
-            <Animated.View
-              pointerEvents="none"
-              style={[styles.heartBurst, heartBurstStyle]}
-            >
-              <Heart color={colors.accent} fill={colors.accent} size={64} />
-            </Animated.View>
-
-            {reasonLabel.length > 0 ? (
-              <View style={styles.reasonChip} pointerEvents="none">
-                <Sparkles color={colors.accent} size={REASON_ICON_SIZE} />
-                <Text style={styles.reasonChipText} numberOfLines={1}>
-                  {reasonLabel}
-                </Text>
-              </View>
-            ) : null}
-
-            {isInteractive && !canLike ? (
-              <PressableScale
-                onPress={handleRequireAuth}
-                style={styles.authButton}
-                accessibilityRole="button"
-                accessibilityLabel="Beğenmek için giriş yap"
-              >
-                <Heart color={colors.accent} size={ACTION_ICON_SIZE} />
-                <Text style={styles.authButtonText}>
-                  Beğenmek için giriş yap
-                </Text>
-              </PressableScale>
-            ) : null}
-          </View>
-
-          <View style={styles.info}>
-            <View style={styles.categoryBadge}>
-              <Text style={styles.categoryBadgeText}>
-                {GARMENT_CATEGORY_LABEL[product.category]}
-              </Text>
-            </View>
-            <Text style={styles.brand} numberOfLines={1}>
-              {product.brand}
-            </Text>
-            <Text style={styles.title} numberOfLines={2}>
-              {product.title}
-            </Text>
-            {(product.colors && product.colors.length > 0) ||
-            (product.sizes && product.sizes.length > 0) ? (
-              <View style={styles.variationRow}>
-                {product.colors && product.colors.length > 0
-                  ? product.colors.slice(0, 4).map((swatch) => (
-                      <View
-                        key={`${swatch.name}-${swatch.hex}`}
-                        style={[
-                          styles.swatch,
-                          { backgroundColor: swatch.hex },
-                        ]}
-                      />
-                    ))
-                  : null}
-                {product.sizes && product.sizes.length > 0 ? (
-                  <Text style={styles.sizeHint}>
-                    {`· ${product.sizes.length} beden`}
-                  </Text>
-                ) : null}
-              </View>
-            ) : null}
-            <View style={styles.priceRow}>
-              {hasCatalogPriceDrop(product) &&
-              typeof product.previousPrice === 'number' ? (
-                <Text style={styles.previousPrice}>
-                  {formatTryPrice(product.previousPrice)}
-                </Text>
+              {isImageLoading && !hasImageError ? (
+                <View style={styles.imageLoading} pointerEvents="none">
+                  <ActivityIndicator color={colors.accent} />
+                </View>
               ) : null}
-              <Text style={styles.price}>{formatPrice(product)}</Text>
-              {hasCatalogPriceDrop(product) &&
-              typeof product.previousPrice === 'number' ? (
-                <View style={styles.dropBadge}>
-                  <Text style={styles.dropBadgeText}>
-                    {`↓ %${getDropPercent(product.previousPrice, getDisplayPrice(product))}`}
+
+              <Animated.View
+                pointerEvents="none"
+                style={[styles.heartBurst, heartBurstStyle]}
+              >
+                <Heart color={colors.accent} fill={colors.accent} size={64} />
+              </Animated.View>
+
+              {reasonLabel.length > 0 ? (
+                <View style={styles.reasonChip} pointerEvents="none">
+                  <Sparkles color={colors.accent} size={REASON_ICON_SIZE} />
+                  <Text style={styles.reasonChipText} numberOfLines={1}>
+                    {reasonLabel}
                   </Text>
                 </View>
               ) : null}
+
+              {isCurrent && !canLike ? (
+                <PressableScale
+                  onPress={handleRequireAuth}
+                  style={styles.authButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Beğenmek için giriş yap"
+                >
+                  <Heart color={colors.accent} size={ACTION_ICON_SIZE} />
+                  <Text style={styles.authButtonText}>
+                    Beğenmek için giriş yap
+                  </Text>
+                </PressableScale>
+              ) : null}
             </View>
 
-            {isInteractive ? (
+            <View style={styles.info}>
+              <View style={styles.categoryBadge}>
+                <Text style={styles.categoryBadgeText}>
+                  {GARMENT_CATEGORY_LABEL[product.category]}
+                </Text>
+              </View>
+              <Text style={styles.brand} numberOfLines={1}>
+                {product.brand}
+              </Text>
+              <Text style={styles.title} numberOfLines={2}>
+                {product.title}
+              </Text>
+              {(product.colors && product.colors.length > 0) ||
+              (product.sizes && product.sizes.length > 0) ? (
+                <View style={styles.variationRow}>
+                  {product.colors && product.colors.length > 0
+                    ? product.colors.slice(0, 4).map((swatch) => (
+                        <View
+                          key={`${swatch.name}-${swatch.hex}`}
+                          style={[
+                            styles.swatch,
+                            { backgroundColor: swatch.hex },
+                          ]}
+                        />
+                      ))
+                    : null}
+                  {product.sizes && product.sizes.length > 0 ? (
+                    <Text style={styles.sizeHint}>
+                      {`· ${product.sizes.length} beden`}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+              <View style={styles.priceRow}>
+                {hasCatalogPriceDrop(product) &&
+                typeof product.previousPrice === 'number' ? (
+                  <Text style={styles.previousPrice}>
+                    {formatTryPrice(product.previousPrice)}
+                  </Text>
+                ) : null}
+                <Text style={styles.price}>{formatPrice(product)}</Text>
+                {hasCatalogPriceDrop(product) &&
+                typeof product.previousPrice === 'number' ? (
+                  <View style={styles.dropBadge}>
+                    <Text style={styles.dropBadgeText}>
+                      {`↓ %${getDropPercent(product.previousPrice, getDisplayPrice(product))}`}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+
+              {/* CTA her zaman mount — page flip CTA unmount etmez. */}
               <GestureDetector gesture={ctaNativeGesture}>
-                <View style={styles.actions} collapsable={false}>
+                <View
+                  style={styles.actions}
+                  collapsable={false}
+                  pointerEvents={isCurrent ? 'auto' : 'none'}
+                >
                   <PressableScale
                     onPress={handleVirtualTryOn}
                     style={styles.primaryAction}
                     accessibilityRole="button"
                     accessibilityLabel="Dene"
                   >
-                    <Sparkles color={colors.inverseText} size={ACTION_ICON_SIZE} />
+                    <Sparkles
+                      color={colors.inverseText}
+                      size={ACTION_ICON_SIZE}
+                    />
                     <Text style={styles.primaryActionText}>Dene</Text>
                   </PressableScale>
                   <PressableScale
@@ -543,27 +575,23 @@ export default function SwipeCard({
                   </PressableScale>
                 </View>
               </GestureDetector>
-            ) : null}
+            </View>
           </View>
-        </View>
-      </Animated.View>
-    </GestureDetector>
+        </Animated.View>
+      </GestureDetector>
+    </Animated.View>
   );
 }
 
-/** Ekran kökünün 16px yatay padding’iyle aynı grid; ekstra inset yok. */
-const CARD_WIDTH = SCREEN_WIDTH - spacing.lg * 2;
-const CARD_HEIGHT = estimateDiscoverCardHeight(SCREEN_HEIGHT);
-/**
- * Çıkış hedefi = undo park Y. Clip dışında bitsin diye kart + 24px + gölge.
- * Aynı uzunluk hem yukarı çıkış hem park dönüşü için geçerlidir.
- */
-const DECK_CLEAR_TRAVEL_PX = deckClearTravelPx(CARD_HEIGHT);
+export default React.memo(SwipeCard);
 
 export const SWIPE_CARD_WIDTH = CARD_WIDTH;
 export const SWIPE_CARD_HEIGHT = CARD_HEIGHT;
 
 const styles = StyleSheet.create({
+  slot: {
+    ...StyleSheet.absoluteFillObject,
+  },
   shadowWrap: {
     width: '100%',
     height: '100%',
@@ -573,12 +601,6 @@ const styles = StyleSheet.create({
   shadowWrapFront: {
     ...shadows.stackSoft,
   },
-  shadowWrapParked: {
-    shadowOpacity: 0,
-    shadowRadius: 0,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 0,
-  },
   card: {
     flex: 1,
     borderRadius: radius.card,
@@ -587,13 +609,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: colors.surface,
   },
-  cardBehind: {
-    borderWidth: 0,
-  },
   imageWrap: {
     flex: 1,
     width: '100%',
-    backgroundColor: colors.bgSoft,
+    backgroundColor: colors.surface,
   },
   image: {
     width: '100%',
@@ -603,42 +622,17 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.bgSoft,
+    backgroundColor: colors.surface,
   },
   imageFallbackText: {
     color: colors.textSecondary,
     fontSize: 15,
     fontWeight: '600',
   },
-  wash: {
+  imageLoading: {
     ...StyleSheet.absoluteFillObject,
-  },
-  passWash: {
-    backgroundColor: colors.passWash,
-  },
-  stamp: {
-    position: 'absolute',
-    top: 28,
-    flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.button,
-    borderWidth: 3,
-    backgroundColor: colors.glass,
-  },
-  passStamp: {
-    left: spacing.xl,
-    right: spacing.xl,
     justifyContent: 'center',
-    borderColor: colors.stampPass,
-  },
-  passStampText: {
-    color: colors.stampPass,
-    fontSize: 18,
-    fontWeight: '800',
-    letterSpacing: 1.2,
   },
   heartBurst: {
     ...StyleSheet.absoluteFillObject,

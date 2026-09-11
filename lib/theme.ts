@@ -39,7 +39,6 @@ export const colors = {
   /** Modal arka perdesi (opaklık animasyonla verilir). */
   backdrop: '#111827',
   likeWash: 'rgba(34, 197, 94, 0.18)',
-  passWash: 'rgba(239, 68, 68, 0.18)',
   shadow: '#1E140A',
   /** Discover segment: track arka planı, kutu/border yok. */
   segmentTrackBg: 'transparent',
