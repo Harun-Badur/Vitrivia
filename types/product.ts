@@ -12,6 +12,8 @@ export interface ProductColor {
 export interface Product {
   id: string;
   imageUrl: string;
+  /** Ordered gallery URLs from CDN scrape; UI may ignore for now. */
+  images?: string[];
   title: string;
   price: number;
   currentPrice?: number;
@@ -57,6 +59,7 @@ export interface FeedProductRow {
   last_price_checked_at?: string | null;
   currency: string;
   image_url: string;
+  images?: string[] | null;
   product_url: string;
   category: string;
   affiliate_url: string | null;
@@ -132,4 +135,17 @@ export const getDropPercent = (
     ((referencePrice - livePrice) / referencePrice) * 100,
   );
   return Math.max(1, percent);
+};
+
+/** Prefer `images` gallery; fall back to single `imageUrl`. */
+export const getProductImages = (product: Product): string[] => {
+  if (Array.isArray(product.images) && product.images.length > 0) {
+    return product.images.filter(
+      (url): url is string => typeof url === 'string' && url.trim().length > 0,
+    );
+  }
+  if (typeof product.imageUrl === 'string' && product.imageUrl.trim().length > 0) {
+    return [product.imageUrl];
+  }
+  return [];
 };

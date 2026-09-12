@@ -3,7 +3,7 @@ import path from 'node:path';
 import { config as loadEnv } from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import {
-  extractProductImage,
+  extractProductImages,
   type ProductImageSource,
 } from './lib/extractProductImage';
 import type { FeedProvider } from '../types/product';
@@ -35,6 +35,7 @@ interface ProductRow {
 interface RefreshResult {
   title: string;
   imageUrl: string;
+  imageCount: number;
   source: ProductImageSource;
   httpStatus: number;
 }
@@ -139,16 +140,20 @@ const refreshProductImages = async (): Promise<void> => {
       ? product.category
       : 'upper_body';
     const fallbackUrl = IMAGE_FALLBACK[category];
-    const extracted = await extractProductImage(
+    const extracted = await extractProductImages(
       product.product_url,
       product.provider,
       fallbackUrl,
     );
 
     if (extracted.source !== 'fallback') {
+      const images =
+        extracted.imageUrls.length > 0
+          ? extracted.imageUrls
+          : [extracted.imageUrl];
       const { error: updateError } = await supabase
         .from('products')
-        .update({ image_url: extracted.imageUrl })
+        .update({ image_url: extracted.imageUrl, images })
         .eq('provider', product.provider)
         .eq('external_id', product.external_id);
 
@@ -163,12 +168,14 @@ const refreshProductImages = async (): Promise<void> => {
     results.push({
       title: product.title,
       imageUrl: product.image_url,
+      imageCount:
+        extracted.source === 'fallback' ? 1 : extracted.imageUrls.length || 1,
       source: extracted.source,
       httpStatus: extracted.httpStatus,
     });
 
     console.log(
-      `${product.title} | HTTP ${extracted.httpStatus} | ${extracted.source} | ${product.image_url}`,
+      `${product.title} | HTTP ${extracted.httpStatus} | ${extracted.source} | images=${extracted.imageUrls.length || (extracted.source === 'fallback' ? 0 : 1)} | ${product.image_url}`,
     );
   }
 
@@ -176,16 +183,17 @@ const refreshProductImages = async (): Promise<void> => {
 
   const { data: verified, error: verifyError } = await supabase
     .from('products')
-    .select('title, image_url')
+    .select('title, image_url, images')
     .order('title', { ascending: true });
 
   if (verifyError) {
     throw new Error(`Doğrulama SELECT başarısız: ${verifyError.message}`);
   }
 
-  console.log('\nSELECT title, image_url FROM products');
+  console.log('\nSELECT title, image_url, images FROM products');
   (verified ?? []).forEach((row) => {
-    console.log(`${row.title}\n  ${row.image_url}`);
+    const count = Array.isArray(row.images) ? row.images.length : 0;
+    console.log(`${row.title}\n  images=${count} ${row.image_url}`);
   });
 
   const cdnCount = results.filter((row) => row.source !== 'fallback').length;

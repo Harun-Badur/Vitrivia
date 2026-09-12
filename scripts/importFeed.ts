@@ -143,6 +143,7 @@ const mapRow = (
     price,
     currency,
     image_url: imageUrl,
+    images: [imageUrl],
     product_url: productUrl,
     category,
     affiliate_url: affiliateUrl.length > 0 ? affiliateUrl : null,

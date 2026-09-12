@@ -36,6 +36,13 @@ export interface ExtractedProductImage {
   httpStatus: number;
 }
 
+export interface ExtractedProductImages extends ExtractedProductImage {
+  /** Ordered, deduped gallery URLs (max 6). Empty when only fallback applies. */
+  imageUrls: string[];
+}
+
+const MAX_GALLERY_IMAGES = 6;
+
 interface FetchHtmlResult {
   html: string;
   httpStatus: number;
@@ -89,14 +96,50 @@ const isProductImageUrl = (raw: string): boolean => {
   return true;
 };
 
-const firstProductImage = (candidates: string[]): string | null => {
+
+/** Collect valid product CDN URLs, dedupe preserve order, optional cap. */
+const collectProductImages = (
+  candidates: string[],
+  cap = MAX_GALLERY_IMAGES,
+): string[] => {
+  const seen = new Set<string>();
+  const out: string[] = [];
   for (const candidate of candidates) {
     if (!isProductImageUrl(candidate)) {
       continue;
     }
-    return normalizeImageUrl(candidate);
+    const normalized = normalizeImageUrl(candidate);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized);
+    if (out.length >= cap) {
+      break;
+    }
   }
-  return null;
+  return out;
+};
+
+const mergeUniqueUrls = (
+  buckets: string[][],
+  cap = MAX_GALLERY_IMAGES,
+): string[] => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const bucket of buckets) {
+    for (const url of bucket) {
+      if (seen.has(url)) {
+        continue;
+      }
+      seen.add(url);
+      out.push(url);
+      if (out.length >= cap) {
+        return out;
+      }
+    }
+  }
+  return out;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -160,17 +203,24 @@ const parseJsonSafe = (raw: string): unknown | null => {
   }
 };
 
-const extractOgImage = ($: CheerioAPI): string | null => {
-  const propertyContent = $('meta[property="og:image"]').first().attr('content');
-  const nameContent = $('meta[name="og:image"]').first().attr('content');
-  return firstProductImage(
-    [propertyContent, nameContent].filter((value): value is string =>
-      Boolean(value),
-    ),
-  );
+const collectOgImages = ($: CheerioAPI): string[] => {
+  const candidates: string[] = [];
+  $('meta[property="og:image"]').each((_index, element) => {
+    const content = $(element).attr('content');
+    if (content) {
+      candidates.push(content);
+    }
+  });
+  $('meta[name="og:image"]').each((_index, element) => {
+    const content = $(element).attr('content');
+    if (content) {
+      candidates.push(content);
+    }
+  });
+  return collectProductImages(candidates);
 };
 
-const extractJsonLdImage = ($: CheerioAPI): string | null => {
+const collectJsonLdImages = ($: CheerioAPI): string[] => {
   const candidates: string[] = [];
   $('script[type="application/ld+json"]').each((_index, element) => {
     const parsed = parseJsonSafe($(element).text());
@@ -179,30 +229,31 @@ const extractJsonLdImage = ($: CheerioAPI): string | null => {
     }
     collectJsonLdImageFields(parsed, candidates);
   });
-  return firstProductImage(candidates);
+  return collectProductImages(candidates);
 };
 
-const extractNextDataImage = ($: CheerioAPI): string | null => {
+const collectNextDataImages = ($: CheerioAPI): string[] => {
   const raw = $('#__NEXT_DATA__').text();
   if (!raw) {
-    return null;
+    return [];
   }
   const parsed = parseJsonSafe(raw);
   if (parsed === null) {
-    return null;
+    return [];
   }
   const strings: string[] = [];
   collectStringUrls(parsed, strings);
   const marketplaceHits = strings.filter(
     (value) => /dsmcdn|trendyol/i.test(value) && isProductImageUrl(value),
   );
-  return firstProductImage(marketplaceHits);
+  return collectProductImages(marketplaceHits);
 };
 
-const extractImgTagImage = (
+const collectImgTagImages = (
   $: CheerioAPI,
   provider: FeedProvider,
-): string | null => {
+  cap = MAX_GALLERY_IMAGES,
+): string[] => {
   const candidates: string[] = [];
   $('img').each((_index, element) => {
     const node = $(element);
@@ -220,10 +271,10 @@ const extractImgTagImage = (
     const hbHits = candidates.filter((value) =>
       /productimages|hepsiburada\.net/i.test(value),
     );
-    return firstProductImage(hbHits);
+    return collectProductImages(hbHits, cap);
   }
 
-  return firstProductImage(candidates);
+  return collectProductImages(candidates, cap);
 };
 
 const isUsableHtml = (html: string, httpStatus: number): boolean =>
@@ -297,35 +348,69 @@ const fetchProductHtml = async (productUrl: string): Promise<FetchHtmlResult> =>
     : curlResult;
 };
 
+export const extractProductImages = async (
+  productUrl: string,
+  provider: FeedProvider,
+  fallbackUrl: string,
+): Promise<ExtractedProductImages> => {
+  const { html, httpStatus } = await fetchProductHtml(productUrl);
+  const $ = cheerio.load(html);
+
+  const ogImages = collectOgImages($);
+  const jsonLdImages = collectJsonLdImages($);
+  const nextDataImages =
+    provider === 'trendyol' ? collectNextDataImages($) : [];
+  const imgTagImages = collectImgTagImages($, provider);
+
+  const imageUrls = mergeUniqueUrls([
+    ogImages,
+    jsonLdImages,
+    nextDataImages,
+    imgTagImages,
+  ]);
+
+  let source: ProductImageSource = 'fallback';
+  if (ogImages.length > 0) {
+    source = 'og';
+  } else if (jsonLdImages.length > 0) {
+    source = 'jsonld';
+  } else if (nextDataImages.length > 0) {
+    source = 'next_data';
+  } else if (imgTagImages.length > 0) {
+    source = 'img';
+  }
+
+  if (imageUrls.length === 0) {
+    return {
+      imageUrls: [],
+      imageUrl: fallbackUrl,
+      source: 'fallback',
+      httpStatus,
+    };
+  }
+
+  return {
+    imageUrls,
+    imageUrl: imageUrls[0] ?? fallbackUrl,
+    source,
+    httpStatus,
+  };
+};
+
+/** Single-image compatible wrapper over extractProductImages. */
 export const extractProductImage = async (
   productUrl: string,
   provider: FeedProvider,
   fallbackUrl: string,
 ): Promise<ExtractedProductImage> => {
-  const { html, httpStatus } = await fetchProductHtml(productUrl);
-  const $ = cheerio.load(html);
-
-  const ogImage = extractOgImage($);
-  if (ogImage) {
-    return { imageUrl: ogImage, source: 'og', httpStatus };
-  }
-
-  const jsonLdImage = extractJsonLdImage($);
-  if (jsonLdImage) {
-    return { imageUrl: jsonLdImage, source: 'jsonld', httpStatus };
-  }
-
-  if (provider === 'trendyol') {
-    const nextDataImage = extractNextDataImage($);
-    if (nextDataImage) {
-      return { imageUrl: nextDataImage, source: 'next_data', httpStatus };
-    }
-  }
-
-  const imgTagImage = extractImgTagImage($, provider);
-  if (imgTagImage) {
-    return { imageUrl: imgTagImage, source: 'img', httpStatus };
-  }
-
-  return { imageUrl: fallbackUrl, source: 'fallback', httpStatus };
+  const extracted = await extractProductImages(
+    productUrl,
+    provider,
+    fallbackUrl,
+  );
+  return {
+    imageUrl: extracted.imageUrl,
+    source: extracted.source,
+    httpStatus: extracted.httpStatus,
+  };
 };

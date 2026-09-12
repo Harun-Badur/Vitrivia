@@ -55,6 +55,7 @@ interface ProductColorJson {
 interface RecsProductJson {
   id: string;
   imageUrl: string;
+  images?: string[];
   title: string;
   price: number;
   currentPrice?: number;
@@ -325,7 +326,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
     );
   }
 
-  let body: unknown = {};
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
@@ -359,7 +360,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
         admin
           .from('products')
           .select(
-            'id, provider, external_id, title, brand, price, current_price, previous_price, last_price_checked_at, currency, image_url, product_url, category, affiliate_url, colors, sizes, created_at',
+            'id, provider, external_id, title, brand, price, current_price, previous_price, last_price_checked_at, currency, image_url, images, product_url, category, affiliate_url, colors, sizes, created_at',
           ),
         admin
           .from('product_attributes')
@@ -457,9 +458,11 @@ Deno.serve(async (request: Request): Promise<Response> => {
           ? row.affiliate_url
           : row.product_url;
 
+      const galleryImages = parseStringArray(row.images);
       const product: RecsProductJson = {
         id: row.id,
-        imageUrl: row.image_url,
+        imageUrl: galleryImages[0] ?? row.image_url,
+        images: galleryImages.length > 0 ? galleryImages : undefined,
         title: row.title,
         price,
         currentPrice,

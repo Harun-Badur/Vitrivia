@@ -54,3 +54,7 @@ grant select on public.products to anon, authenticated;
 grant all on public.products to service_role;
 
 alter table public.products add column if not exists garment_description text;
+
+-- FAZ 2a multi-image gallery (nullable jsonb; scraper writes ordered URL array)
+alter table public.products add column if not exists images jsonb null default null;
+

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { config as loadEnv } from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import {
-  extractProductImage,
+  extractProductImages,
   type ProductImageSource,
 } from './lib/extractProductImage';
 import type { FeedProvider } from '../types/product';
@@ -38,6 +38,7 @@ interface CatalogRow {
   price: number;
   currency: string;
   image_url: string;
+  images: string[];
   product_url: string;
   category: GarmentCategory;
   affiliate_url: null;
@@ -192,11 +193,15 @@ const seedCatalog = async (): Promise<void> => {
   for (const item of CATALOG) {
     const productUrl = toCanonicalUrl(item.rawUrl);
     const externalId = extractExternalId(productUrl);
-    const extracted = await extractProductImage(
+    const extracted = await extractProductImages(
       productUrl,
       item.provider,
       IMAGE_FALLBACK[item.category],
     );
+    const images =
+      extracted.imageUrls.length > 0
+        ? extracted.imageUrls
+        : [extracted.imageUrl];
     built.push({
       id: `${item.provider}-${externalId}`,
       provider: item.provider,
@@ -206,6 +211,7 @@ const seedCatalog = async (): Promise<void> => {
       price: item.price,
       currency: 'TRY',
       image_url: extracted.imageUrl,
+      images,
       product_url: productUrl,
       category: item.category,
       affiliate_url: null,
@@ -243,6 +249,12 @@ const seedCatalog = async (): Promise<void> => {
     insertError = retry.error;
   }
 
+  if (insertError?.message.toLowerCase().includes('images')) {
+    const withoutImages = payload.map(({ images: _images, ...row }) => row);
+    const retry = await supabase.from('products').insert(withoutImages);
+    insertError = retry.error;
+  }
+
   if (insertError) {
     throw new Error(`Yeni katalog yazılamadı: ${insertError.message}`);
   }
@@ -253,7 +265,9 @@ const seedCatalog = async (): Promise<void> => {
     (row) => row.provider === 'hepsiburada',
   ).length;
   console.log(`inserted=${built.length}`);
+  const multi = built.filter((row) => row.images.length > 1).length;
   console.log(`cdn_images=${ogCount}`);
+  console.log(`multi_images=${multi}`);
   console.log(`fallback=${built.length - ogCount}`);
   console.log(`trendyol=${trendyol} hepsiburada=${hepsiburada}`);
 };

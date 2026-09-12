@@ -116,6 +116,15 @@ const parseStringArray = (value: unknown): string[] => {
   return value.filter((item): item is string => typeof item === 'string');
 };
 
+const parseImages = (value: unknown): string[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(
+    (item): item is string => typeof item === 'string' && item.trim().length > 0,
+  );
+};
+
 const toPrice = (value: number | string): number => {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
@@ -148,10 +157,13 @@ const mapFeedRow = (row: FeedProductRow): Product | null => {
 
   const listPrice = toPrice(row.price);
   const currentPrice = parseOptionalNumeric(row.current_price);
+  const images = parseImages(row.images);
+  const imageUrl = images[0] ?? row.image_url;
 
   return {
     id: row.id,
-    imageUrl: row.image_url,
+    imageUrl,
+    images: images.length > 0 ? images : undefined,
     title: row.title,
     price: listPrice,
     currentPrice,
@@ -267,8 +279,16 @@ const parseFeedItem = (value: unknown): RecsFeedItem | null => {
       ? value.position
       : 0;
   const firstReason = reasons[0]?.trim();
+  const edgeImages = parseImages(
+    isRecord(value.product) ? value.product.images : undefined,
+  );
+  const edgeImageUrl =
+    edgeImages[0] ??
+    (typeof value.product.imageUrl === 'string' ? value.product.imageUrl : '');
   const product: Product = {
     ...value.product,
+    imageUrl: edgeImageUrl,
+    images: edgeImages.length > 0 ? edgeImages : undefined,
     garmentDescription:
       typeof value.product.garmentDescription === 'string' &&
       value.product.garmentDescription.trim().length > 0
@@ -344,19 +364,35 @@ const fetchCatalog = async (): Promise<Product[]> => {
   }
 
   const poolLimit = Math.max(DEFAULT_FEED_LIMIT * FETCH_POOL_MULTIPLIER, DEFAULT_FEED_LIMIT);
-  const [productsResult, attributesResult] = await Promise.all([
-    client
+  const productSelectWithImages =
+    'id, provider, external_id, title, brand, price, current_price, previous_price, last_price_checked_at, currency, image_url, images, product_url, category, affiliate_url, colors, sizes, created_at';
+  const productSelectLegacy =
+    'id, provider, external_id, title, brand, price, current_price, previous_price, last_price_checked_at, currency, image_url, product_url, category, affiliate_url, colors, sizes, created_at';
+
+  let productsResult: {
+    data: unknown[] | null;
+    error: { message: string } | null;
+  } = await client
+    .from('products')
+    .select(productSelectWithImages)
+    .limit(poolLimit);
+
+  if (
+    productsResult.error &&
+    /column .*images.* does not exist/i.test(productsResult.error.message)
+  ) {
+    logger.warn('products.images yok; legacy select kullanılıyor');
+    productsResult = await client
       .from('products')
-      .select(
-        'id, provider, external_id, title, brand, price, current_price, previous_price, last_price_checked_at, currency, image_url, product_url, category, affiliate_url, colors, sizes, created_at',
-      )
-      .limit(poolLimit),
-    client
-      .from('product_attributes')
-      .select(
-        'product_id, gender, colors, fit, subcategory, brand_slug, price_band',
-      ),
-  ]);
+      .select(productSelectLegacy)
+      .limit(poolLimit);
+  }
+
+  const attributesResult = await client
+    .from('product_attributes')
+    .select(
+      'product_id, gender, colors, fit, subcategory, brand_slug, price_band',
+    );
 
   if (productsResult.error) {
     logger.error('Supabase ürün feedi alınamadı', {
@@ -509,8 +545,9 @@ export const fetchFeedProducts = async (
         source: 'edge',
         n: edge.items.length,
       });
+      const edgeProducts = neverEmpty(edge.items.map((item) => item.product));
       return {
-        products: neverEmpty(edge.items.map((item) => item.product)),
+        products: edgeProducts,
         source: 'edge',
         isPersonalized: true,
         recommendationId: edge.recommendation_id,
@@ -532,8 +569,9 @@ export const fetchFeedProducts = async (
   }
 
   if (!userId) {
+    const catalogSlice = catalog.slice(0, limit);
     return {
-      products: catalog.slice(0, limit),
+      products: catalogSlice,
       source: 'supabase',
       isPersonalized: false,
     };
@@ -554,8 +592,9 @@ export const fetchFeedProducts = async (
   } catch (error) {
     logger.debug('Yerel skorlama düştü; katalog sırası kullanılıyor', { error });
     track('feed_fallback', null, { reason: 'local_rank_failed' });
+    const fallbackProducts = neverEmpty(catalog.slice(0, limit));
     return {
-      products: neverEmpty(catalog.slice(0, limit)),
+      products: fallbackProducts,
       source: 'supabase',
       isPersonalized: false,
     };
