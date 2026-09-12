@@ -9,7 +9,6 @@ import {
   View,
   type LayoutChangeEvent,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -39,8 +38,6 @@ import {
   facetChipsOnly,
   feedQueryFromFilters,
   removeFacet,
-  SEARCH_HISTORY_KEY,
-  SEARCH_HISTORY_LIMIT,
   type FeedQuery,
   type FeedQueryFacetKey,
   type FeedQueryFilters,
@@ -194,8 +191,6 @@ export default function FeedScreen() {
   const [feedQuery, setFeedQuery] = useState<FeedQuery>(EMPTY_FEED_QUERY);
   const [searchInput, setSearchInput] = useState('');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
-  const [searchFocused, setSearchFocused] = useState(false);
-  const [searchHistory, setSearchHistory] = useState<string[]>([]);
   const feedQueryRef = useRef(feedQuery);
   feedQueryRef.current = feedQuery;
 
@@ -257,40 +252,6 @@ export default function FeedScreen() {
     // Initial personal load only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
-
-  useEffect(() => {
-    let mounted = true;
-    void AsyncStorage.getItem(SEARCH_HISTORY_KEY).then((raw) => {
-      if (!mounted || !raw) return;
-      try {
-        const parsed: unknown = JSON.parse(raw);
-        if (
-          Array.isArray(parsed) &&
-          parsed.every((item) => typeof item === 'string')
-        ) {
-          setSearchHistory(parsed.slice(0, SEARCH_HISTORY_LIMIT));
-        }
-      } catch {
-        // ignore corrupt history
-      }
-    });
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  const pushSearchHistory = useCallback(async (query: string): Promise<void> => {
-    const trimmed = query.trim();
-    if (trimmed.length === 0) return;
-    setSearchHistory((prev) => {
-      const next = [
-        trimmed,
-        ...prev.filter((item) => item.toLocaleLowerCase('tr-TR') !== trimmed.toLocaleLowerCase('tr-TR')),
-      ].slice(0, SEARCH_HISTORY_LIMIT);
-      void AsyncStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
-      return next;
-    });
-  }, []);
 
   // Prefetch budget: current card all images (cap 6); next/warm only images[0].
   useEffect(() => {
@@ -409,7 +370,6 @@ export default function FeedScreen() {
       // of searchable state so bar + panel stay one source after commit.
       const next = feedQueryFromFilters(parsed.filters);
       applyFeedQuery(next, { inputText: trimmed });
-      void pushSearchHistory(trimmed);
       track('search', null, {
         query: trimmed,
         category: parsed.filters.category ?? null,
@@ -417,7 +377,7 @@ export default function FeedScreen() {
         result_count: null,
       });
     },
-    [applyFeedQuery, pushSearchHistory],
+    [applyFeedQuery],
   );
 
   const handleSearchChange = useCallback(
@@ -626,8 +586,6 @@ export default function FeedScreen() {
           <TextInput
             value={searchInput}
             onChangeText={handleSearchChange}
-            onFocus={() => setSearchFocused(true)}
-            onBlur={() => setSearchFocused(false)}
             onSubmitEditing={() => commitSearchText(searchInput)}
             placeholder="Ne arıyorsun?"
             placeholderTextColor={colors.placeholder}
@@ -658,30 +616,6 @@ export default function FeedScreen() {
             {activeFilterCount > 0 ? <View style={styles.filterDot} /> : null}
           </PressableScale>
         </View>
-        {searchFocused && searchHistory.length > 0 && !isSearchMode ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.historyRow}
-            contentContainerStyle={styles.chipRowContent}
-            keyboardShouldPersistTaps="handled"
-          >
-            {searchHistory.map((item) => (
-              <Pressable
-                key={item}
-                onPress={() => {
-                  setSearchInput(item);
-                  commitSearchText(item);
-                }}
-                style={styles.historyChip}
-                accessibilityRole="button"
-                accessibilityLabel={`Geçmiş arama ${item}`}
-              >
-                <Text style={styles.historyChipText}>{item}</Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        ) : null}
         {isSearchMode ? (
           <View style={styles.searchMetaBlock}>
             {showSearchBanner && searchBannerText ? (
@@ -885,10 +819,6 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     maxHeight: 36,
   },
-  historyRow: {
-    marginTop: spacing.sm,
-    maxHeight: 36,
-  },
   chipRowContent: {
     alignItems: 'center',
     gap: spacing.sm,
@@ -920,19 +850,6 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 12,
     fontWeight: '700',
-  },
-  historyChip: {
-    backgroundColor: colors.input,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.chip,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-  },
-  historyChipText: {
-    color: colors.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
   },
   searchMetaBlock: {
     gap: spacing.xs,
