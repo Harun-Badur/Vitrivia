@@ -57,6 +57,47 @@ const BROWSER_HEADERS: Record<string, string> = {
   'Upgrade-Insecure-Requests': '1',
 };
 
+/** TR storefront cookies avoid geo soft-block / select-country shell. */
+const TRENDYOL_STOREFRONT_COOKIE =
+  'storefrontId=1; language=tr; countryCode=TR; Culture=tr-TR';
+
+const headersForUrl = (productUrl: string): Record<string, string> => {
+  const headers: Record<string, string> = { ...BROWSER_HEADERS };
+  try {
+    const host = new URL(productUrl).hostname;
+    if (host.includes('trendyol.com')) {
+      headers.Cookie = TRENDYOL_STOREFRONT_COOKIE;
+      headers.Referer = 'https://www.trendyol.com/';
+    } else if (host.includes('hepsiburada.com')) {
+      headers.Referer = 'https://www.hepsiburada.com/';
+    }
+  } catch {
+    /* ignore invalid URL; use base headers */
+  }
+  return headers;
+};
+
+const isSoftBlockedMarketplaceHtml = (html: string): boolean => {
+  if (!html) {
+    return true;
+  }
+  // Avoid matching pathMatchers JSON that lists "/select-country" on every shell.
+  if (/pageType"\s*:\s*"select_country"/.test(html)) {
+    return true;
+  }
+  if (/storefrontId"\s*:\s*"-1"/.test(html)) {
+    return true;
+  }
+  const genericShell = /Türkiye'nin Trend Yolu|Trend Yolu \| Trendyol/.test(
+    html,
+  );
+  const hasProductOgImage =
+    /property=["']og:image["'][^>]+content=["']https?:\/\/(?:cdn\.dsmcdn\.com|productimages\.hepsiburada\.net)/i.test(
+      html,
+    );
+  return genericShell && !hasProductOgImage;
+};
+
 const unescapeHtml = (value: string): string =>
   value
     .replace(/&amp;/g, '&')
@@ -285,7 +326,7 @@ const isUsableHtml = (html: string, httpStatus: number): boolean =>
 const fetchHtmlViaNode = async (productUrl: string): Promise<FetchHtmlResult> => {
   try {
     const response = await fetch(productUrl, {
-      headers: BROWSER_HEADERS,
+      headers: headersForUrl(productUrl),
       redirect: 'follow',
     });
     const html = await response.text();
@@ -299,28 +340,30 @@ const fetchHtmlViaCurl = async (productUrl: string): Promise<FetchHtmlResult> =>
   const curlBin = process.platform === 'win32' ? 'curl.exe' : 'curl';
   const dir = await mkdtemp(path.join(os.tmpdir(), 'kabin-product-html-'));
   const filePath = path.join(dir, 'page.html');
+  const headers = headersForUrl(productUrl);
+  const curlArgs = [
+    '-sS',
+    '-L',
+    '--max-time',
+    '30',
+    '-A',
+    headers['User-Agent'] ?? CHROME_USER_AGENT,
+    '-H',
+    'Accept-Language: tr-TR,tr;q=0.9,en;q=0.8',
+    '-H',
+    `Accept: ${ACCEPT_HTML}`,
+  ];
+  if (headers.Cookie) {
+    curlArgs.push('-H', `Cookie: ${headers.Cookie}`);
+  }
+  if (headers.Referer) {
+    curlArgs.push('-e', headers.Referer);
+  }
+  curlArgs.push('-o', filePath, '-w', '%{http_code}', productUrl);
   try {
-    const { stdout } = await execFileAsync(
-      curlBin,
-      [
-        '-sS',
-        '-L',
-        '--max-time',
-        '30',
-        '-A',
-        CHROME_USER_AGENT,
-        '-H',
-        'Accept-Language: tr-TR,tr;q=0.9,en;q=0.8',
-        '-H',
-        `Accept: ${ACCEPT_HTML}`,
-        '-o',
-        filePath,
-        '-w',
-        '%{http_code}',
-        productUrl,
-      ],
-      { maxBuffer: 20 * 1024 * 1024 },
-    );
+    const { stdout } = await execFileAsync(curlBin, curlArgs, {
+      maxBuffer: 20 * 1024 * 1024,
+    });
     const html = await readFile(filePath, 'utf8');
     const httpStatus = Number.parseInt(stdout.trim(), 10);
     return {
@@ -334,18 +377,34 @@ const fetchHtmlViaCurl = async (productUrl: string): Promise<FetchHtmlResult> =>
   }
 };
 
+const isProductHtmlCandidate = (
+  html: string,
+  httpStatus: number,
+): boolean =>
+  isUsableHtml(html, httpStatus) && !isSoftBlockedMarketplaceHtml(html);
+
 const fetchProductHtml = async (productUrl: string): Promise<FetchHtmlResult> => {
   const nodeResult = await fetchHtmlViaNode(productUrl);
-  if (isUsableHtml(nodeResult.html, nodeResult.httpStatus)) {
+  if (isProductHtmlCandidate(nodeResult.html, nodeResult.httpStatus)) {
     return nodeResult;
   }
   const curlResult = await fetchHtmlViaCurl(productUrl);
-  if (isUsableHtml(curlResult.html, curlResult.httpStatus)) {
+  if (isProductHtmlCandidate(curlResult.html, curlResult.httpStatus)) {
     return curlResult;
   }
-  return nodeResult.html.length >= curlResult.html.length
-    ? nodeResult
-    : curlResult;
+  // Prefer larger body only when neither looks like a soft-block shell.
+  if (
+    !isSoftBlockedMarketplaceHtml(curlResult.html) &&
+    curlResult.html.length > nodeResult.html.length
+  ) {
+    return curlResult;
+  }
+  if (!isSoftBlockedMarketplaceHtml(nodeResult.html)) {
+    return nodeResult;
+  }
+  return curlResult.html.length >= nodeResult.html.length
+    ? curlResult
+    : nodeResult;
 };
 
 export const extractProductImages = async (

@@ -67,7 +67,8 @@
     "seed:attributes": "tsx scripts/seed-attributes.ts",
     "simulate:price-drop": "tsx scripts/simulate-price-drop.ts",
     "lint": "eslint .",
-    "test": "jest"
+    "test": "jest",
+    "seed:expansion": "tsx scripts/seedExpansionFromLinks.ts"
   },
   "private": true
 }
