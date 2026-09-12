@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import {
   ActivityIndicator,
   Dimensions,
+  type LayoutChangeEvent,
   StyleSheet,
   Text,
   View,
@@ -22,7 +23,6 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Heart, ShoppingBag, Sparkles } from 'lucide-react-native';
 import PressableScale from './PressableScale';
-import { hapticPurchaseIntent, hapticSwipeDecision } from '../lib/haptics';
 import { logger } from '../lib/logger';
 import {
   CARD_SPRING_BACK,
@@ -46,6 +46,7 @@ import {
   GARMENT_CATEGORY_LABEL,
   getDisplayPrice,
   getDropPercent,
+  getProductImages,
   hasCatalogPriceDrop,
   type Product,
 } from '../types/product';
@@ -59,14 +60,31 @@ const HEART_BURST_OUT_MS = 260;
 const HEART_BURST_PEAK_SCALE = 1.18;
 /** Soft crossfade when bitmap arrives; pairs with surface placeholder (no white flash). */
 const IMAGE_CROSSFADE_MS = 0;
+const IMAGE_PREFETCH_CAP = 6;
 const ACTION_ICON_SIZE = 16;
 const REASON_ICON_SIZE = 12;
+/** Horizontal gallery: activate after 6px X; fail if 12px Y first (card vertical wins). */
+const IMAGE_SWIPE_ACTIVE_OFFSET_X_PX = 6;
+const IMAGE_SWIPE_FAIL_OFFSET_Y_PX = 12;
+/** End rubber-band: excess translation ×0.3 at first/last index. */
+const IMAGE_RUBBER_BAND = 0.3;
+/** Release commit: |vX| > 500 or |tX| > width×0.25 → change index. */
+const IMAGE_COMMIT_VELOCITY_X = 500;
+const IMAGE_COMMIT_DISTANCE_RATIO = 0.25;
+/** Snap settle — withTiming 180ms (not spring). */
+const IMAGE_SNAP_DURATION_MS = 180;
+const IMAGE_DOT_SIZE = 7;
+const IMAGE_DOT_GAP = 6;
+const IMAGE_DOT_TRANSITION_MS = 120;
 /** object-position: top-center — tam boy kadraj (hedef oran ~0.68). */
 const IMAGE_CONTENT_POSITION = { top: 0, left: '50%' } as const;
 
 /** Ekran kökünün 16px yatay padding’iyle aynı grid; ekstra inset yok. */
 const CARD_WIDTH = SCREEN_WIDTH - spacing.lg * 2;
 const CARD_HEIGHT = estimateDiscoverCardHeight(SCREEN_HEIGHT);
+
+/** Persists gallery index across unmount so undo restores the same image. */
+const imageIndexByProductId = new Map<string, number>();
 
 export type { Product };
 
@@ -101,6 +119,26 @@ export interface SwipeCardProps {
 const formatPrice = (product: Product): string =>
   formatTryPrice(getDisplayPrice(product));
 
+function GalleryDot({ active }: { active: boolean }) {
+  const progress = useSharedValue(active ? 1 : 0);
+
+  useEffect(() => {
+    progress.value = withTiming(active ? 1 : 0, { duration: IMAGE_DOT_TRANSITION_MS });
+  }, [active, progress]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0, 1], [0.5, 1]),
+    transform: [
+      {
+        scale: interpolate(progress.value, [0, 1], [1, 1.2]),
+      },
+    ],
+  }));
+
+  return <Animated.View style={[styles.galleryDot, animatedStyle]} />;
+}
+
+
 function SwipeCard({
   product,
   pageIndex,
@@ -128,13 +166,50 @@ function SwipeCard({
   const [isImageLoading, setIsImageLoading] = useState(true);
   const imageCachedRef = useRef(false);
 
+  const imagesKey =
+    Array.isArray(product.images) && product.images.length > 0
+      ? product.images.join('|')
+      : product.imageUrl;
+  const images = useMemo(
+    () => getProductImages(product),
+    // product fields captured via imagesKey + id
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable gallery key
+    [product.id, imagesKey],
+  );
+  const imageCount = images.length;
+  const [imageIndex, setImageIndex] = useState(() => {
+    const stored = imageIndexByProductId.get(product.id) ?? 0;
+    const max = Math.max(0, getProductImages(product).length - 1);
+    return Math.min(Math.max(0, stored), max);
+  });
+
+  const [pagerWidth, setPagerWidth] = useState(CARD_WIDTH);
+  const pageWidthSV = useSharedValue(CARD_WIDTH);
+  const galleryX = useSharedValue(0);
+  const imageIndexSV = useSharedValue(imageIndex);
+  const imageCountSV = useSharedValue(imageCount);
+
+  useEffect(() => {
+    const stored = imageIndexByProductId.get(product.id) ?? 0;
+    const max = Math.max(0, images.length - 1);
+    const next = Math.min(Math.max(0, stored), max);
+    setImageIndex(next);
+    imageIndexSV.value = next;
+    imageCountSV.value = images.length;
+    cancelAnimation(galleryX);
+    galleryX.value = -next * pageWidthSV.value;
+  }, [product.id, images, galleryX, imageCountSV, imageIndexSV, pageWidthSV]);
+
+  const selectedImageUrl =
+    images[imageIndex] ?? product.imageUrl;
+
   useEffect(() => {
     let cancelled = false;
     imageCachedRef.current = false;
     setHasImageError(false);
     setIsImageLoading(true);
     // Prefetch/cache hit: onLoad gelmeden spinner'ı kapat.
-    void Image.getCachePathAsync(product.imageUrl).then((cachedPath) => {
+    void Image.getCachePathAsync(selectedImageUrl).then((cachedPath) => {
       if (!cancelled && cachedPath) {
         imageCachedRef.current = true;
         setIsImageLoading(false);
@@ -143,7 +218,15 @@ function SwipeCard({
     return () => {
       cancelled = true;
     };
-  }, [product.id, product.imageUrl]);
+  }, [product.id, selectedImageUrl]);
+
+  // Current card: prefetch gallery (cap 6). Next/warm handled by Discover parent (images[0] only).
+  useEffect(() => {
+    if (pageIndex !== 0 || images.length === 0) {
+      return;
+    }
+    void Image.prefetch(images.slice(0, IMAGE_PREFETCH_CAP));
+  }, [pageIndex, product.id, images]);
 
   useEffect(() => {
     const id = product.id;
@@ -213,14 +296,54 @@ function SwipeCard({
 
   const handleVirtualTryOn = useCallback((): void => {
     try {
-      onVirtualTryOn(product);
+      const vtonUrl = images[imageIndex] ?? product.imageUrl;
+      onVirtualTryOn({ ...product, imageUrl: vtonUrl });
     } catch (error) {
       logger.error('Sanal deneme başlatılamadı', {
         error,
         productId: product.id,
       });
     }
-  }, [onVirtualTryOn, product]);
+  }, [images, imageIndex, onVirtualTryOn, product]);
+
+  const prefetchNeighbor = useCallback(
+    (index: number): void => {
+      const url = images[index];
+      if (typeof url === 'string' && url.length > 0) {
+        void Image.prefetch(url);
+      }
+    },
+    [images],
+  );
+
+  const commitImageIndex = useCallback(
+    (nextIndex: number): void => {
+      if (nextIndex < 0 || nextIndex >= images.length) {
+        return;
+      }
+      setImageIndex(nextIndex);
+      imageIndexByProductId.set(product.id, nextIndex);
+      // Lazy prefetch ±1 from the new index.
+      prefetchNeighbor(nextIndex - 1);
+      prefetchNeighbor(nextIndex + 1);
+    },
+    [images.length, prefetchNeighbor, product.id],
+  );
+
+  const handleImagePagerLayout = useCallback(
+    (event: LayoutChangeEvent): void => {
+      const width = event.nativeEvent.layout.width;
+      if (!(width > 0)) {
+        return;
+      }
+      if (Math.abs(width - pageWidthSV.value) > 0.5) {
+        setPagerWidth(width);
+      }
+      pageWidthSV.value = width;
+      galleryX.value = -imageIndexSV.value * width;
+    },
+    [galleryX, imageIndexSV, pageWidthSV],
+  );
 
   const handleRequireAuth = useCallback((): void => {
     try {
@@ -250,7 +373,6 @@ function SwipeCard({
   }, [onUndoPass]);
 
   const handleStorePress = useCallback((): void => {
-    hapticPurchaseIntent();
     handleBuy();
   }, [handleBuy]);
 
@@ -261,10 +383,6 @@ function SwipeCard({
     }
     handleAddToCloset();
   }, [canLike, handleAddToCloset, handleRequireAuth]);
-
-  const notifyEmptyUndo = useCallback((): void => {
-    hapticSwipeDecision();
-  }, []);
 
   const snapHome = (): void => {
     'worklet';
@@ -296,7 +414,6 @@ function SwipeCard({
 
       if (shouldCommitPass(y, vy)) {
         hasExited.value = true;
-        runOnJS(hapticSwipeDecision)();
         dragOffset.value = withSpring(
           -H,
           { ...CARD_THROW_SPRING, velocity: vy },
@@ -312,11 +429,9 @@ function SwipeCard({
       if (shouldCommitUndo(y, vy)) {
         if (!canUndo) {
           snapHome();
-          runOnJS(notifyEmptyUndo)();
           return;
         }
         hasExited.value = true;
-        runOnJS(hapticSwipeDecision)();
         dragOffset.value = withSpring(
           H,
           { ...CARD_THROW_SPRING, velocity: vy },
@@ -357,7 +472,6 @@ function SwipeCard({
       if (hasExited.value) {
         return;
       }
-      runOnJS(hapticSwipeDecision)();
       if (!canLike) {
         runOnJS(handleRequireAuth)();
         return;
@@ -370,6 +484,62 @@ function SwipeCard({
     doubleTapGesture,
     panGesture,
   );
+
+  /**
+   * Image-only horizontal pager. Separation from card vertical via offsets only:
+   * X±6 activates gallery; Y±12 first fails so card pass/undo wins.
+   * No simultaneousHandlers / exclusive / requireExternal / blocksExternal vs vertical.
+   */
+  const imagePanGesture = Gesture.Pan()
+    .enabled(isCurrent && imageCount > 1)
+    .minPointers(1)
+    .activeOffsetX([-IMAGE_SWIPE_ACTIVE_OFFSET_X_PX, IMAGE_SWIPE_ACTIVE_OFFSET_X_PX])
+    .failOffsetY([-IMAGE_SWIPE_FAIL_OFFSET_Y_PX, IMAGE_SWIPE_FAIL_OFFSET_Y_PX])
+    .onUpdate((event) => {
+      const width = pageWidthSV.value;
+      if (!(width > 0)) {
+        return;
+      }
+      const idx = imageIndexSV.value;
+      const last = imageCountSV.value - 1;
+      const tx = event.translationX;
+      // Direct drag — no withSpring while dragging. Rubber-band excess at ends ×0.3.
+      let dragX = tx;
+      if (idx <= 0 && tx > 0) {
+        dragX = tx * IMAGE_RUBBER_BAND;
+      } else if (idx >= last && tx < 0) {
+        dragX = tx * IMAGE_RUBBER_BAND;
+      }
+      galleryX.value = -idx * width + dragX;
+    })
+    .onEnd((event) => {
+      const width = pageWidthSV.value;
+      const count = imageCountSV.value;
+      if (!(width > 0) || count <= 1) {
+        return;
+      }
+      const idx = imageIndexSV.value;
+      const tx = event.translationX;
+      const vx = event.velocityX;
+      let next = idx;
+      if (
+        Math.abs(vx) > IMAGE_COMMIT_VELOCITY_X ||
+        Math.abs(tx) > width * IMAGE_COMMIT_DISTANCE_RATIO
+      ) {
+        const direction =
+          Math.abs(vx) > IMAGE_COMMIT_VELOCITY_X ? Math.sign(vx) : Math.sign(tx);
+        // Finger left (neg) → next image; finger right (pos) → previous.
+        if (direction < 0) {
+          next = Math.min(count - 1, idx + 1);
+        } else if (direction > 0) {
+          next = Math.max(0, idx - 1);
+        }
+      }
+      // Dot/index commit on same tick as snap decision (before animation ends).
+      imageIndexSV.value = next;
+      runOnJS(commitImageIndex)(next);
+      galleryX.value = withTiming(-next * width, { duration: IMAGE_SNAP_DURATION_MS });
+    });
 
   const animatedCardStyle = useAnimatedStyle(() => {
     const H = pageHeight.value > 0 ? pageHeight.value : CARD_HEIGHT;
@@ -392,10 +562,16 @@ function SwipeCard({
     ],
   }));
 
+  const galleryStripStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: galleryX.value }],
+  }));
+
   const imageSource = useMemo(
-    () => ({ uri: product.imageUrl }),
-    [product.imageUrl],
+    () => ({ uri: selectedImageUrl }),
+    [selectedImageUrl],
   );
+
+  const showGalleryPager = imageCount > 1;
 
   const slotTranslateStyle = useMemo(
     () => ({ transform: [{ translateY: pageIndex * CARD_HEIGHT }] }),
@@ -436,11 +612,50 @@ function SwipeCard({
           accessibilityLabel={`${product.brand} ${product.title}, ${formatPrice(product)}`}
         >
           <View style={styles.card}>
-            <View style={styles.imageWrap}>
+            <View style={styles.imageWrap} onLayout={handleImagePagerLayout}>
               {hasImageError ? (
                 <View style={styles.imageFallback}>
                   <Text style={styles.imageFallbackText}>Görsel yüklenemedi</Text>
                 </View>
+              ) : showGalleryPager ? (
+                <GestureDetector gesture={imagePanGesture}>
+                  <Animated.View
+                    style={styles.imagePager}
+                    collapsable={false}
+                    accessibilityRole="image"
+                    accessibilityLabel={`Ürün görselleri, ${imageIndex + 1}/${imageCount}`}
+                  >
+                    <Animated.View
+                      style={[
+                        styles.imageStrip,
+                        { width: pagerWidth * imageCount },
+                        galleryStripStyle,
+                      ]}
+                    >
+                      {images.map((uri, index) => (
+                        <Image
+                          key={`${product.id}:${index}`}
+                          source={{ uri }}
+                          style={[styles.imagePage, { width: pagerWidth }]}
+                          contentFit="cover"
+                          contentPosition={IMAGE_CONTENT_POSITION}
+                          cachePolicy="memory-disk"
+                          recyclingKey={`${product.id}:${index}`}
+                          transition={IMAGE_CROSSFADE_MS}
+                          priority={
+                            pageIndex === 0 || pageIndex === 1 || pageIndex === 2
+                              ? 'high'
+                              : 'low'
+                          }
+                          onLoadStart={
+                            index === imageIndex ? handleImageLoadStart : undefined
+                          }
+                          onLoad={index === imageIndex ? handleImageLoad : undefined}
+                        />
+                      ))}
+                    </Animated.View>
+                  </Animated.View>
+                </GestureDetector>
               ) : (
                 <Image
                   source={imageSource}
@@ -448,7 +663,7 @@ function SwipeCard({
                   contentFit="cover"
                   contentPosition={IMAGE_CONTENT_POSITION}
                   cachePolicy="memory-disk"
-                  recyclingKey={product.id}
+                  recyclingKey={`${product.id}:${imageIndex}`}
                   transition={IMAGE_CROSSFADE_MS}
                   priority={pageIndex === 0 || pageIndex === 1 || pageIndex === 2 ? 'high' : 'low'}
                   onLoadStart={handleImageLoadStart}
@@ -460,6 +675,17 @@ function SwipeCard({
               {isImageLoading && !hasImageError ? (
                 <View style={styles.imageLoading} pointerEvents="none">
                   <ActivityIndicator color={colors.accent} />
+                </View>
+              ) : null}
+
+              {showGalleryPager ? (
+                <View style={styles.dotsRow} pointerEvents="none">
+                  {images.map((_, index) => (
+                    <GalleryDot
+                      key={`${product.id}:dot:${index}`}
+                      active={index === imageIndex}
+                    />
+                  ))}
                 </View>
               ) : null}
 
@@ -633,6 +859,35 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  imagePager: {
+    flex: 1,
+    width: '100%',
+    overflow: 'hidden',
+  },
+  imageStrip: {
+    flexDirection: 'row',
+    height: '100%',
+  },
+  imagePage: {
+    height: '100%',
+  },
+  dotsRow: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: spacing.md,
+    zIndex: 3,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: IMAGE_DOT_GAP,
+  },
+  galleryDot: {
+    width: IMAGE_DOT_SIZE,
+    height: IMAGE_DOT_SIZE,
+    borderRadius: IMAGE_DOT_SIZE / 2,
+    backgroundColor: '#FFFFFF',
   },
   heartBurst: {
     ...StyleSheet.absoluteFillObject,

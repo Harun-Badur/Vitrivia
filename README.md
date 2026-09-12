@@ -167,8 +167,8 @@ doğrula; prebuild bunları `expo run:*` olarak değiştiriyor ve proje CNG
 
 ### İzinler
 
-Manifeste yalnızca `INTERNET`, `POST_NOTIFICATIONS`, `VIBRATE` (kaydırma
-dokunsal geri bildirimi) ve galeri okuma izinleri girer.
+Manifeste yalnızca `INTERNET`, `POST_NOTIFICATIONS`, `VIBRATE` (bildirim
+titreşimi) ve galeri okuma izinleri girer.
 `expo-image-picker` varsayılan olarak `CAMERA` ve `RECORD_AUDIO` da
 ekliyor; ikisi de `android.blockedPermissions` ile kaldırılıyor çünkü uygulama
 kamera ya da mikrofon kullanmıyor. Bu listeyi genişletmeden önce Play Console

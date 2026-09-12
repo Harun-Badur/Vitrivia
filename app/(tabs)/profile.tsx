@@ -28,7 +28,6 @@ import PressableScale from '../../components/PressableScale';
 import SizeStudioSheet from '../../components/SizeStudioSheet';
 import TryOnHistorySheet from '../../components/TryOnHistorySheet';
 import { useAuthContext } from '../../hooks/useAuthContext';
-import { hapticSwipeDecision } from '../../lib/haptics';
 import { buildInviteShareMessage } from '../../lib/inviteShare';
 import { logger } from '../../lib/logger';
 import { checkLowResolutionPersonPhoto } from '../../lib/personPhotoPrepare';
@@ -197,7 +196,6 @@ export default function ProfileScreen() {
     try {
       const next = await upsertStudioProfile(userId, patch);
       setStudio(next);
-      hapticSwipeDecision();
     } catch (error) {
       logger.error('Stüdyo kaydı başarısız', { error });
       setErrorMessage(
@@ -241,7 +239,6 @@ export default function ProfileScreen() {
       setPhotoUri(result.assets[0].uri);
       const lowRes = await checkLowResolutionPersonPhoto(result.assets[0].uri);
       setIsModelPhotoLowRes(lowRes);
-      hapticSwipeDecision();
     } catch (error) {
       logger.error('Model fotoğrafı yüklenemedi', { error });
       setErrorMessage(
@@ -265,7 +262,6 @@ export default function ProfileScreen() {
       setStudio(next);
       setPhotoUri(null);
       setIsModelPhotoLowRes(false);
-      hapticSwipeDecision();
     } catch (error) {
       logger.error('Model fotoğrafı kaldırılamadı', { error });
       setErrorMessage(

@@ -52,7 +52,7 @@ import {
   type ProductFilters,
 } from '../../services/productService';
 import { useAppStore } from '../../store/useAppStore';
-import type { Product } from '../../types/product';
+import { getProductImages, type Product } from '../../types/product';
 import type { FeedMode } from '../../types/recommendation';
 
 const TOAST_DURATION_MS = 1600;
@@ -195,20 +195,35 @@ export default function FeedScreen() {
     reloadFeed();
   }, [reloadFeed]);
 
-  const prefetchCurrentUrl = currentProducts[0]?.imageUrl;
-  const prefetchNextUrl = currentProducts[1]?.imageUrl;
-  const prefetchThirdUrl = currentProducts[2]?.imageUrl;
-
-  // Prefetch current + next + third card images so ↑ reveals a warm cache (no hard pop).
+  // Prefetch budget: current card all images (cap 6); next/warm only images[0].
   useEffect(() => {
-    const urls = [prefetchCurrentUrl, prefetchNextUrl, prefetchThirdUrl].filter(
+    const urls: string[] = [];
+    const current = currentProducts[0];
+    if (current) {
+      urls.push(...getProductImages(current).slice(0, 6));
+    }
+    const next = currentProducts[1];
+    if (next) {
+      const first = getProductImages(next)[0];
+      if (first) {
+        urls.push(first);
+      }
+    }
+    const warm = currentProducts[2];
+    if (warm) {
+      const first = getProductImages(warm)[0];
+      if (first) {
+        urls.push(first);
+      }
+    }
+    const unique = Array.from(new Set(urls)).filter(
       (url): url is string => typeof url === 'string' && url.length > 0,
     );
-    if (urls.length === 0) {
+    if (unique.length === 0) {
       return;
     }
-    void Image.prefetch(urls);
-  }, [prefetchCurrentUrl, prefetchNextUrl, prefetchThirdUrl]);
+    void Image.prefetch(unique);
+  }, [currentProducts]);
 
   const handleRequireAuth = useCallback((): void => {
     router.push('/profile');

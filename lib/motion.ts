@@ -32,13 +32,13 @@ export const PASS_DISTANCE_PX = 84;
 export const PASS_VELOCITY_PX = 920;
 export const UNDO_DISTANCE_PX = 84;
 export const UNDO_VELOCITY_PX = 920;
-/** Pan yalnız bu Y eşiği aşılınca açılır; yatay/çapraz sürükleme hiç aktive etmez. */
-export const PAN_ACTIVE_OFFSET_Y_PX = 18;
+/** Pan yalnız bu Y eşiği aşılınca açılır; yatay galeri failOffsetY (±12) ile dengeli. */
+export const PAN_ACTIVE_OFFSET_Y_PX = 8;
 /**
  * Bu X eşiği Y’den önce aşılırsa jest iptal: sağ/sol kartı kıpırdatmaz.
- * Y biraz daha erken açılır ki hafif çaprazda yalnız dikey 1:1 kalsın.
+ * Yatay galeri activeOffsetX (±6) ile simetrik ayrım — yalnız fail/activeOffset.
  */
-export const PAN_FAIL_OFFSET_X_PX = 40;
+export const PAN_FAIL_OFFSET_X_PX = 12;
 export const CARD_SPRING_BACK = {
   damping: 24,
   stiffness: 280,

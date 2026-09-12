@@ -46,7 +46,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useAuthContext } from '../hooks/useAuthContext';
 import { track } from '../lib/analytics';
 import { grantVtonConsent, hasVtonConsent } from '../lib/consent';
-import { hapticSuccess } from '../lib/haptics';
 import { logger } from '../lib/logger';
 import { checkLowResolutionPersonPhoto } from '../lib/personPhotoPrepare';
 import { recordSessionProductAction } from '../lib/sessionIntent';
@@ -607,7 +606,6 @@ export default function VirtualTryOnModal({
       });
       setResultImageUrl(outputUrl);
       setStatus('success');
-      hapticSuccess();
       track('try_on_success', product.id, {
         result_shown: true,
         before_after_used: false,
