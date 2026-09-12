@@ -825,7 +825,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   shadowWrapFront: {
-    ...shadows.stackSoft,
+    elevation: 0,
   },
   card: {
     flex: 1,
