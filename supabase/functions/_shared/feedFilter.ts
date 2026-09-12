@@ -21,8 +21,94 @@ export interface FilterableCandidate {
   subcategory: string;
 }
 
-const normalize = (value: string): string =>
+/** Mirrors lib/productAttributes COLOR_ALIASES slug → keys (edge copy). */
+const COLOR_KEYS: ReadonlyArray<{ slug: string; keys: readonly string[] }> = [
+  { slug: 'siyah', keys: ['siyah', 'black'] },
+  { slug: 'beyaz', keys: ['beyaz', 'white'] },
+  { slug: 'gri', keys: ['gri', 'grey', 'gray', 'antrasit', 'anthracite'] },
+  { slug: 'bej', keys: ['bej', 'beige', 'krem', 'ekru', 'ivory'] },
+  { slug: 'kahverengi', keys: ['kahverengi', 'kahve', 'brown'] },
+  { slug: 'navy', keys: ['navy', 'lacivert', 'indigo'] },
+  { slug: 'mavi', keys: ['mavi', 'blue'] },
+  { slug: 'kirmizi', keys: ['kırmızı', 'kirmizi', 'red'] },
+  { slug: 'pembe', keys: ['pembe', 'pink', 'fuşya', 'fusya'] },
+  { slug: 'yesil', keys: ['yeşil', 'yesil', 'green', 'haki', 'olive'] },
+  { slug: 'sari', keys: ['sarı', 'sari', 'yellow', 'hardal'] },
+  { slug: 'turuncu', keys: ['turuncu', 'orange'] },
+  { slug: 'mor', keys: ['mor', 'purple', 'lila', 'violet'] },
+  { slug: 'bordo', keys: ['bordo', 'burgundy', 'maroon'] },
+  { slug: 'camel', keys: ['camel', 'camel rengi'] },
+  { slug: 'altin', keys: ['altın', 'altin', 'gold'] },
+  { slug: 'gumus', keys: ['gümüş', 'gumus', 'silver'] },
+  { slug: 'turkuaz', keys: ['turkuaz', 'teal'] },
+  { slug: 'krem', keys: ['cream'] },
+  {
+    slug: 'desenli',
+    keys: ['desenli', 'çiçek', 'cicek', 'floral', 'çizgili', 'cizgili'],
+  },
+];
+
+const normalizeTr = (value: string): string =>
   value.trim().toLocaleLowerCase('tr-TR');
+
+const foldTr = (value: string): string =>
+  normalizeTr(value)
+    .replace(/ı/g, 'i')
+    .replace(/ğ/g, 'g')
+    .replace(/ü/g, 'u')
+    .replace(/ş/g, 's')
+    .replace(/ö/g, 'o')
+    .replace(/ç/g, 'c');
+
+const colorKeysForSlug = (slug: string): string[] => {
+  const alias = COLOR_KEYS.find((item) => item.slug === slug);
+  if (!alias) {
+    return [slug];
+  }
+  return [alias.slug, ...alias.keys];
+};
+
+const facetHaystack = (item: FilterableCandidate): string =>
+  foldTr(
+    `${item.colors.join(' ')} ${item.title} ${item.brand} ${item.subcategory}`,
+  );
+
+const termInHaystack = (term: string, hayFolded: string): boolean => {
+  const needle = foldTr(term);
+  if (needle.length === 0) {
+    return true;
+  }
+  return hayFolded.includes(needle);
+};
+
+const matchesColorFacet = (
+  item: FilterableCandidate,
+  colorSlug: string,
+): boolean => {
+  if (item.colors.includes(colorSlug)) {
+    return true;
+  }
+  const hay = facetHaystack(item);
+  return colorKeysForSlug(colorSlug).some((key) => termInHaystack(key, hay));
+};
+
+const matchesStyleFacet = (
+  item: FilterableCandidate,
+  style: string,
+): boolean => termInHaystack(style, facetHaystack(item));
+
+const matchesBrandFacet = (
+  item: FilterableCandidate,
+  brand: string,
+): boolean => termInHaystack(brand, facetHaystack(item));
+
+const matchesTextTitle = (title: string, text: string): boolean => {
+  const needle = foldTr(text);
+  if (needle.length === 0) {
+    return true;
+  }
+  return foldTr(title).includes(needle);
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
@@ -78,9 +164,6 @@ const matchesHard = (
   if (typeof filters.priceMax === 'number' && item.price > filters.priceMax) {
     return false;
   }
-  if (filters.brand && normalize(item.brand) !== normalize(filters.brand)) {
-    return false;
-  }
   return true;
 };
 
@@ -89,26 +172,21 @@ const matchesSoft = (
   filters: StructuredFilters,
   drop: ReadonlySet<SoftFilterKey>,
 ): boolean => {
+  if (filters.brand && !matchesBrandFacet(item, filters.brand)) {
+    return false;
+  }
   if (!drop.has('color') && filters.color) {
-    const hay = normalize(`${item.title} ${item.garmentDescription}`);
-    const inSlugs = item.colors.includes(filters.color);
-    if (!inSlugs && !hay.includes(normalize(filters.color))) {
+    if (!matchesColorFacet(item, filters.color)) {
       return false;
     }
   }
   if (!drop.has('style') && filters.style) {
-    const hay = normalize(
-      `${item.title} ${item.garmentDescription} ${item.subcategory}`,
-    );
-    if (!hay.includes(normalize(filters.style))) {
+    if (!matchesStyleFacet(item, filters.style)) {
       return false;
     }
   }
   if (!drop.has('text') && filters.text) {
-    const hay = normalize(
-      `${item.brand} ${item.title} ${item.garmentDescription}`,
-    );
-    if (!hay.includes(normalize(filters.text))) {
+    if (!matchesTextTitle(item.title, filters.text)) {
       return false;
     }
   }
@@ -125,9 +203,9 @@ export const applyFilterMaskProgressive = <T>(
   items: T[],
   filters: StructuredFilters,
   toCandidate: (item: T) => FilterableCandidate,
-): { items: T[]; fallback: boolean; dropped: SoftFilterKey[] } => {
+): { items: T[]; fallback: boolean; relaxed: SoftFilterKey[] } => {
   if (!hasStructuredFilters(filters)) {
-    return { items, fallback: false, dropped: [] };
+    return { items, fallback: false, relaxed: [] };
   }
 
   const softOrder: SoftFilterKey[] = ['color', 'style', 'text'];
@@ -139,7 +217,7 @@ export const applyFilterMaskProgressive = <T>(
 
   let matched = run();
   if (matched.length > 0) {
-    return { items: matched, fallback: false, dropped: [] };
+    return { items: matched, fallback: false, relaxed: [] };
   }
 
   const hasSoft =
@@ -148,10 +226,10 @@ export const applyFilterMaskProgressive = <T>(
     Boolean(filters.text);
 
   if (!hasSoft) {
-    return { items: [], fallback: false, dropped: [] };
+    return { items: [], fallback: false, relaxed: [] };
   }
 
-  const dropped: SoftFilterKey[] = [];
+  const relaxed: SoftFilterKey[] = [];
   for (const key of softOrder) {
     const present =
       (key === 'color' && Boolean(filters.color)) ||
@@ -159,12 +237,12 @@ export const applyFilterMaskProgressive = <T>(
       (key === 'text' && Boolean(filters.text));
     if (!present) continue;
     drop.add(key);
-    dropped.push(key);
+    relaxed.push(key);
     matched = run();
     if (matched.length > 0) {
-      return { items: matched, fallback: true, dropped };
+      return { items: matched, fallback: false, relaxed };
     }
   }
 
-  return { items: [], fallback: dropped.length > 0, dropped };
+  return { items: [], fallback: true, relaxed };
 };

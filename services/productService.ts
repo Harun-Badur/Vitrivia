@@ -40,8 +40,10 @@ export interface FetchFeedProductsResult {
   source: FeedSource;
   isPersonalized: boolean;
   recommendationId?: string;
-  /** Soft filter progressive relax from edge/local. */
+  /** True when personal recs substituted after empty search mask. */
   fallback?: boolean;
+  /** Soft facets dropped during progressive relax. */
+  relaxed?: string[];
 }
 
 const DEFAULT_FEED_LIMIT = 20;
@@ -324,12 +326,16 @@ const parseFeedResponse = (value: unknown): RecsFeedResponse | null => {
   const items = value.items
     .map(parseFeedItem)
     .filter((item): item is RecsFeedItem => item !== null);
+  const relaxed = Array.isArray(value.relaxed)
+    ? value.relaxed.filter((item): item is string => typeof item === 'string')
+    : [];
   return {
     recommendation_id: value.recommendation_id,
     score_id: value.score_id,
     config_version: value.config_version,
     items,
     fallback: value.fallback === true,
+    relaxed,
   };
 };
 
@@ -566,6 +572,7 @@ export const fetchFeedProducts = async (
         isPersonalized: true,
         recommendationId: edge.recommendation_id,
         fallback: edge.fallback === true,
+        relaxed: edge.relaxed ?? [],
       };
     }
 
@@ -585,16 +592,21 @@ export const fetchFeedProducts = async (
 
   const applyLocalFilters = (
     products: Product[],
-  ): { products: Product[]; fallback: boolean } => {
+  ): { products: Product[]; fallback: boolean; relaxed: string[] } => {
     if (!hasAnyFilter(filters)) {
-      return { products, fallback: false };
+      return { products, fallback: false, relaxed: [] };
     }
     const masked = applyFilterMaskProgressive(products, filters, (p) => p);
-    return { products: masked.items, fallback: masked.fallback };
+    return {
+      products: masked.items,
+      fallback: masked.fallback,
+      relaxed: masked.relaxed,
+    };
   };
 
   if (!userId) {
     const filtered = applyLocalFilters(catalog);
+    const usedPersonal = filtered.products.length === 0 && hasAnyFilter(filters);
     const catalogSlice = (filtered.products.length > 0
       ? filtered.products
       : catalog
@@ -603,13 +615,15 @@ export const fetchFeedProducts = async (
       products: catalogSlice,
       source: 'supabase',
       isPersonalized: false,
-      fallback: filtered.fallback,
+      fallback: filtered.fallback || usedPersonal,
+      relaxed: filtered.relaxed,
     };
   }
 
   try {
     const ranked = await rankLocally(catalog, userId, intent, limit * 3, mode);
     const filtered = applyLocalFilters(ranked);
+    const usedPersonal = filtered.products.length === 0 && hasAnyFilter(filters);
     const sliced = (filtered.products.length > 0
       ? filtered.products
       : ranked
@@ -618,18 +632,21 @@ export const fetchFeedProducts = async (
       ms: Date.now() - startedAt,
       source: 'supabase',
       n: sliced.length,
-      fallback: filtered.fallback,
+      fallback: filtered.fallback || usedPersonal,
+      relaxed: filtered.relaxed,
     });
     return {
       products: neverEmpty(sliced),
       source: 'supabase',
       isPersonalized: true,
-      fallback: filtered.fallback,
+      fallback: filtered.fallback || usedPersonal,
+      relaxed: filtered.relaxed,
     };
   } catch (error) {
     logger.debug('Yerel skorlama düştü; katalog sırası kullanılıyor', { error });
     track('feed_fallback', null, { reason: 'local_rank_failed' });
     const filtered = applyLocalFilters(catalog);
+    const usedPersonal = filtered.products.length === 0 && hasAnyFilter(filters);
     const fallbackProducts = neverEmpty(
       (filtered.products.length > 0 ? filtered.products : catalog).slice(0, limit),
     );
@@ -637,7 +654,8 @@ export const fetchFeedProducts = async (
       products: fallbackProducts,
       source: 'supabase',
       isPersonalized: false,
-      fallback: filtered.fallback,
+      fallback: filtered.fallback || usedPersonal,
+      relaxed: filtered.relaxed,
     };
   }
 };

@@ -1,25 +1,29 @@
 import type { FeedQueryFilters } from './feedQuery';
-import { COLOR_ALIASES } from './productAttributes';
+import {
+  matchesBrandFacet,
+  matchesColorFacet,
+  matchesStyleFacet,
+  matchesTextTitle,
+} from './searchMatch';
 import { getDisplayPrice, type Product } from '../types/product';
-
-const normalize = (value: string): string =>
-  value.trim().toLocaleLowerCase('tr-TR');
 
 export type SoftFilterKey = 'color' | 'style' | 'text';
 
 export interface FilterMaskResult<T> {
   items: T[];
+  /** True only when soft ladder exhausted and items still empty (caller fills personal). */
   fallback: boolean;
-  dropped: SoftFilterKey[];
+  /** Soft fields dropped during progressive relax. */
+  relaxed: SoftFilterKey[];
 }
 
-const colorKeysForSlug = (slug: string): string[] => {
-  const alias = COLOR_ALIASES.find((item) => item.slug === slug);
-  if (!alias) {
-    return [slug];
-  }
-  return [alias.slug, ...alias.keys];
-};
+const productFields = (product: Product) => ({
+  title: product.title,
+  brand: product.brand,
+  colorSlugs: product.colorSlugs,
+  colorNames: (product.colors ?? []).map((c) => c.name),
+  subcategory: product.subcategory,
+});
 
 const productMatchesHard = (
   product: Product,
@@ -35,11 +39,6 @@ const productMatchesHard = (
   if (typeof filters.priceMax === 'number' && price > filters.priceMax) {
     return false;
   }
-  if (filters.brand) {
-    if (normalize(product.brand) !== normalize(filters.brand)) {
-      return false;
-    }
-  }
   return true;
 };
 
@@ -48,33 +47,25 @@ const productMatchesSoft = (
   filters: FeedQueryFilters,
   drop: ReadonlySet<SoftFilterKey>,
 ): boolean => {
+  const fields = productFields(product);
+
+  // Brand is a facet term (color/title/brand haystack) but not in soft relax ladder.
+  if (filters.brand && !matchesBrandFacet(fields, filters.brand)) {
+    return false;
+  }
+
   if (!drop.has('color') && filters.color) {
-    const slugs = product.colorSlugs ?? [];
-    if (!slugs.includes(filters.color)) {
-      const keys = colorKeysForSlug(filters.color).map(normalize);
-      const names = (product.colors ?? []).map((c) => normalize(c.name));
-      const hay = normalize(`${product.title} ${product.garmentDescription}`);
-      const hit =
-        names.some((n) => keys.some((k) => n.includes(k) || k.includes(n))) ||
-        keys.some((k) => hay.includes(k));
-      if (!hit) {
-        return false;
-      }
+    if (!matchesColorFacet(fields, filters.color)) {
+      return false;
     }
   }
   if (!drop.has('style') && filters.style) {
-    const hay = normalize(
-      `${product.title} ${product.garmentDescription} ${product.subcategory ?? ''}`,
-    );
-    if (!hay.includes(normalize(filters.style))) {
+    if (!matchesStyleFacet(fields, filters.style)) {
       return false;
     }
   }
   if (!drop.has('text') && filters.text && filters.text.trim().length > 0) {
-    const hay = normalize(
-      `${product.brand} ${product.title} ${product.garmentDescription}`,
-    );
-    if (!hay.includes(normalize(filters.text))) {
+    if (!matchesTextTitle(product.title, filters.text)) {
       return false;
     }
   }
@@ -91,6 +82,7 @@ export const productMatchesFilters = (
 
 /**
  * Score order preserved. Soft facets (color → style → text) relax if empty.
+ * `fallback` is true only when the ladder is exhausted and the set is still empty.
  */
 export const applyFilterMaskProgressive = <T>(
   items: T[],
@@ -107,7 +99,7 @@ export const applyFilterMaskProgressive = <T>(
 
   let matched = run();
   if (matched.length > 0) {
-    return { items: matched, fallback: false, dropped: [] };
+    return { items: matched, fallback: false, relaxed: [] };
   }
 
   const hasSoft =
@@ -116,10 +108,10 @@ export const applyFilterMaskProgressive = <T>(
     Boolean(filters.text && filters.text.trim().length > 0);
 
   if (!hasSoft) {
-    return { items: [], fallback: false, dropped: [] };
+    return { items: [], fallback: false, relaxed: [] };
   }
 
-  const dropped: SoftFilterKey[] = [];
+  const relaxed: SoftFilterKey[] = [];
   for (const key of softOrder) {
     const present =
       (key === 'color' && Boolean(filters.color)) ||
@@ -128,12 +120,12 @@ export const applyFilterMaskProgressive = <T>(
         Boolean(filters.text && filters.text.trim().length > 0));
     if (!present) continue;
     drop.add(key);
-    dropped.push(key);
+    relaxed.push(key);
     matched = run();
     if (matched.length > 0) {
-      return { items: matched, fallback: true, dropped };
+      return { items: matched, fallback: false, relaxed };
     }
   }
 
-  return { items: [], fallback: dropped.length > 0, dropped };
+  return { items: [], fallback: true, relaxed };
 };

@@ -20,7 +20,7 @@ const CATEGORY_ALIASES: ReadonlyArray<{
   { category: 'dresses', keys: ['elbise', 'elbiseler', 'dress', 'dresses'] },
   {
     category: 'upper_body',
-    keys: ['üst', 'ust', 'üst giyim', 'ust giyim', 'upper', 'tişört', 'tisort'],
+    keys: ['üst', 'ust', 'üst giyim', 'ust giyim', 'upper', 'tişört', 'tisort', 'bluz', 'blouse'],
   },
   {
     category: 'lower_body',

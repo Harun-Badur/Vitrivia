@@ -562,10 +562,22 @@ Deno.serve(async (request: Request): Promise<Response> => {
             subcategory: row.entry.candidate.subcategory,
           }),
         )
-      : { items: scoredWithProduct, fallback: false, dropped: [] as string[] };
+      : { items: scoredWithProduct, fallback: false, relaxed: [] as string[] };
+
+    // Never return an empty search set: personal recs + fallback when mask empty.
+    let maskedRows = masked.items;
+    let feedFallback = false;
+    const relaxed = masked.relaxed;
+    if (
+      hasStructuredFilters(structuredFilters) &&
+      maskedRows.length === 0
+    ) {
+      maskedRows = scoredWithProduct;
+      feedFallback = true;
+    }
 
     const ranked = rerankForDiversity(
-      masked.items.map((row) => row.entry),
+      maskedRows.map((row) => row.entry),
       intent,
       rankedConfig,
       profile,
@@ -594,7 +606,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
         msg: 'recs-feed',
         ms: elapsedMs,
         n: items.length,
-        fallback: masked.fallback,
+        fallback: feedFallback,
+        relaxed,
         config_version: rankedConfig.configVersion,
       }),
     );
@@ -604,7 +617,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
       score_id: crypto.randomUUID(),
       config_version: rankedConfig.configVersion,
       items,
-      fallback: masked.fallback,
+      fallback: feedFallback,
+      relaxed,
     });
   } catch (error) {
     console.error('recs-feed başarısız', {

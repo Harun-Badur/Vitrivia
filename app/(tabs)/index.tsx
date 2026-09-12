@@ -46,6 +46,7 @@ import {
   type FeedQueryFilters,
 } from '../../lib/feedQuery';
 import { parseSearchQuery } from '../../lib/searchQueryParse';
+import { searchRelaxBannerText } from '../../lib/searchRelaxMessage';
 import { setSessionFilters, setSessionQuery } from '../../lib/sessionIntent';
 import { hasSeenSwipeHint, markSwipeHintSeen } from '../../lib/onboarding';
 import {
@@ -148,6 +149,7 @@ export default function FeedScreen() {
   const setFeedMode = useAppStore((state) => state.setFeedMode);
   const feedMode = useAppStore((state) => state.feedMode);
   const feedFallback = useAppStore((state) => state.feedFallback);
+  const feedRelaxed = useAppStore((state) => state.feedRelaxed);
   const swipeRight = useAppStore((state) => state.swipeRight);
   const swipeLeft = useAppStore((state) => state.swipeLeft);
   const undoPass = useAppStore((state) => state.undoPass);
@@ -586,7 +588,13 @@ export default function FeedScreen() {
     () => facetChipsOnly(feedQuery.filters),
     [feedQuery.filters],
   );
-  const showFallbackBanner = isSearchMode && feedFallback;
+  const searchBannerText = useMemo(() => {
+    if (!isSearchMode) {
+      return null;
+    }
+    return searchRelaxBannerText(feedQuery.filters, feedRelaxed, feedFallback);
+  }, [isSearchMode, feedQuery.filters, feedRelaxed, feedFallback]);
+  const showSearchBanner = Boolean(searchBannerText);
 
   useEffect(() => {
     return () => {
@@ -675,30 +683,37 @@ export default function FeedScreen() {
           </ScrollView>
         ) : null}
         {isSearchMode ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.chipRow}
-            contentContainerStyle={styles.chipRowContent}
-          >
-            <View style={styles.countChip}>
-              <Text style={styles.countChipText}>
-                {currentProducts.length} sonuç
-              </Text>
-            </View>
-            {facetChips.map((chip) => (
-              <Pressable
-                key={`${chip.key}:${chip.label}`}
-                onPress={() => handleRemoveFacet(chip.key)}
-                style={styles.facetChip}
-                accessibilityRole="button"
-                accessibilityLabel={`${chip.label} filtresini kaldır`}
-              >
-                <Text style={styles.facetChipText}>{chip.label}</Text>
-                <X color={colors.textSecondary} size={12} />
-              </Pressable>
-            ))}
-          </ScrollView>
+          <View style={styles.searchMetaBlock}>
+            {showSearchBanner && searchBannerText ? (
+              <View style={styles.fallbackBanner}>
+                <Text style={styles.fallbackBannerText}>{searchBannerText}</Text>
+              </View>
+            ) : null}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.chipRow}
+              contentContainerStyle={styles.chipRowContent}
+            >
+              <View style={styles.countChip}>
+                <Text style={styles.countChipText}>
+                  {currentProducts.length} sonuç
+                </Text>
+              </View>
+              {facetChips.map((chip) => (
+                <Pressable
+                  key={`${chip.key}:${chip.label}`}
+                  onPress={() => handleRemoveFacet(chip.key)}
+                  style={styles.facetChip}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${chip.label} filtresini kaldır`}
+                >
+                  <Text style={styles.facetChipText}>{chip.label}</Text>
+                  <X color={colors.textSecondary} size={12} />
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
         ) : null}
         <View style={styles.segmentWrap}>
           <FeedModeSegment value={feedMode} onChange={handleFeedModeChange} />
@@ -710,13 +725,6 @@ export default function FeedScreen() {
           { paddingBottom: layout.deckPadding + discoverCardLiftPx },
         ]}
       >
-        {showFallbackBanner ? (
-          <View style={styles.fallbackBanner}>
-            <Text style={styles.fallbackBannerText}>
-              Eşleşme yok — benzerlerini gösteriyoruz
-            </Text>
-          </View>
-        ) : null}
         {isLoading ? (
           <LoadingFeed />
         ) : isCatalogExhausted && !isSearchMode ? (
@@ -926,8 +934,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
+  searchMetaBlock: {
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+  },
   fallbackBanner: {
-    marginBottom: spacing.sm,
+    marginBottom: 0,
     backgroundColor: colors.accentSoft,
     borderRadius: radius.button,
     paddingHorizontal: spacing.md,

@@ -55,4 +55,11 @@ describe('parseSearchQuery', () => {
   it('returns empty filters for blank input', () => {
     expect(parseSearchQuery('   ').filters).toEqual({});
   });
+
+  it('maps bluz to upper_body category', () => {
+    expect(parseSearchQuery('siyah bluz').filters).toMatchObject({
+      color: 'siyah',
+      category: 'upper_body',
+    });
+  });
 });

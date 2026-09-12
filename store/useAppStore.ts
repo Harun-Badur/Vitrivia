@@ -41,6 +41,7 @@ interface AppState {
   feedIsPersonalized: boolean;
   feedMode: FeedMode;
   feedFallback: boolean;
+  feedRelaxed: string[];
   sessionUserId: string | null;
   sessionSyncStatus: SessionSyncStatus;
   loadFeed: (
@@ -157,6 +158,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   feedIsPersonalized: false,
   feedMode: DEFAULT_FEED_MODE,
   feedFallback: false,
+  feedRelaxed: [],
   sessionUserId: null,
   sessionSyncStatus: 'idle',
   // userId çağıran ekrandan geçer: feed effect'i kök layout'un hidrasyonundan
@@ -184,6 +186,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         source: result.source,
         isPersonalized: result.isPersonalized,
         fallback: result.fallback === true,
+        relaxed: result.relaxed ?? [],
         searchMode,
       });
       set((state) => ({
@@ -196,6 +199,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         feedSource: result.source,
         feedIsPersonalized: result.isPersonalized,
         feedFallback: result.fallback === true,
+        feedRelaxed: result.relaxed ?? [],
       }));
     } catch (error) {
       logger.error('Feed yüklenemedi; mock ürünlere düşülüyor.', { error });
@@ -209,6 +213,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         feedSource: 'mock',
         feedIsPersonalized: false,
         feedFallback: false,
+        feedRelaxed: [],
       }));
     }
   },
@@ -249,6 +254,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       feedIsPersonalized: false,
       feedMode: DEFAULT_FEED_MODE,
       feedFallback: false,
+      feedRelaxed: [],
     });
     resetSessionIntent();
   },

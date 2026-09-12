@@ -206,6 +206,8 @@ export interface RecsFeedResponse {
   score_id: string;
   config_version: string;
   items: RecsFeedItem[];
-  /** True when soft filters were progressively relaxed. */
+  /** True when search mask emptied and personal recs were substituted. */
   fallback?: boolean;
+  /** Soft facets dropped during progressive relax (e.g. ['color']). */
+  relaxed?: string[];
 }
