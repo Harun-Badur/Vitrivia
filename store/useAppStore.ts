@@ -4,6 +4,8 @@ import { logger } from '../lib/logger';
 import { track } from '../lib/analytics';
 import { recordSessionProductAction, resetSessionIntent } from '../lib/sessionIntent';
 import { setLastFeedMode } from '../lib/recsFeedState';
+import type { FeedQueryFilters } from '../lib/feedQuery';
+import { hasAnyFilter } from '../lib/feedQuery';
 import {
   fetchFeedProducts,
   type FeedSource,
@@ -38,9 +40,16 @@ interface AppState {
   feedSource: FeedSource | null;
   feedIsPersonalized: boolean;
   feedMode: FeedMode;
+  feedFallback: boolean;
   sessionUserId: string | null;
   sessionSyncStatus: SessionSyncStatus;
-  loadFeed: (userId: string | null) => Promise<void>;
+  loadFeed: (
+    userId: string | null,
+    options?: {
+      filters?: FeedQueryFilters;
+      searchMode?: boolean;
+    },
+  ) => Promise<void>;
   setFeedMode: (mode: FeedMode) => void;
   hydrateSession: (userId: string) => Promise<void>;
   resetSession: () => void;
@@ -147,17 +156,35 @@ export const useAppStore = create<AppState>((set, get) => ({
   feedSource: null,
   feedIsPersonalized: false,
   feedMode: DEFAULT_FEED_MODE,
+  feedFallback: false,
   sessionUserId: null,
   sessionSyncStatus: 'idle',
   // userId çağıran ekrandan geçer: feed effect'i kök layout'un hidrasyonundan
   // önce koştuğu için sessionUserId burada henüz null olabiliyor.
-  loadFeed: async (userId: string | null): Promise<void> => {
+  loadFeed: async (
+    userId: string | null,
+    options?: {
+      filters?: FeedQueryFilters;
+      searchMode?: boolean;
+    },
+  ): Promise<void> => {
     set({ feedStatus: 'loading' });
     try {
-      const result = await fetchFeedProducts(FEED_LIMIT, userId, get().feedMode);
+      const filters = options?.filters ?? {};
+      const searchMode =
+        options?.searchMode === true || hasAnyFilter(filters);
+      const result = await fetchFeedProducts(
+        FEED_LIMIT,
+        userId,
+        get().feedMode,
+        filters,
+        searchMode ? 'search' : get().feedMode,
+      );
       logger.debug('Feed yüklendi', {
         source: result.source,
         isPersonalized: result.isPersonalized,
+        fallback: result.fallback === true,
+        searchMode,
       });
       set((state) => ({
         currentProducts: excludeSeen(
@@ -168,6 +195,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         feedStatus: 'success',
         feedSource: result.source,
         feedIsPersonalized: result.isPersonalized,
+        feedFallback: result.fallback === true,
       }));
     } catch (error) {
       logger.error('Feed yüklenemedi; mock ürünlere düşülüyor.', { error });
@@ -180,6 +208,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         feedStatus: 'error',
         feedSource: 'mock',
         feedIsPersonalized: false,
+        feedFallback: false,
       }));
     }
   },
@@ -219,6 +248,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       passedStack: [],
       feedIsPersonalized: false,
       feedMode: DEFAULT_FEED_MODE,
+      feedFallback: false,
     });
     resetSessionIntent();
   },

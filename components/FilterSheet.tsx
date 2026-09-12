@@ -7,11 +7,11 @@ import {
   View,
 } from 'react-native';
 import PressableScale from './PressableScale';
+import {
+  COLOR_CHIP_LABELS,
+  type FeedQueryFilters,
+} from '../lib/feedQuery';
 import { colors, radius, spacing } from '../lib/theme';
-import type {
-  ProductFilters,
-  ProductGender,
-} from '../services/productService';
 import type { GarmentCategory } from '../types/product';
 
 const CATEGORY_CHIPS: { value: GarmentCategory; label: string }[] = [
@@ -20,19 +20,39 @@ const CATEGORY_CHIPS: { value: GarmentCategory; label: string }[] = [
   { value: 'dresses', label: 'Elbise' },
 ];
 
-const GENDER_CHIPS: { value: ProductGender; label: string }[] = [
-  { value: 'women', label: 'Kadın' },
-  { value: 'men', label: 'Erkek' },
-  { value: 'unisex', label: 'Unisex' },
-];
+const COLOR_CHIPS: { value: string; label: string }[] = [
+  'siyah',
+  'beyaz',
+  'kirmizi',
+  'mavi',
+  'navy',
+  'yesil',
+  'pembe',
+  'gri',
+  'bej',
+  'kahverengi',
+].map((value) => ({
+  value,
+  label: COLOR_CHIP_LABELS[value] ?? value,
+}));
 
-const SIZE_CHIPS = ['XS', 'S', 'M', 'L', 'XL', 'XXL'] as const;
+const STYLE_CHIPS = ['midi', 'maxi', 'mini', 'abiye', 'triko', 'saten'] as const;
+
+const PRICE_PRESETS: {
+  label: string;
+  priceMin?: number;
+  priceMax?: number;
+}[] = [
+  { label: '<500₺', priceMax: 500 },
+  { label: '500-1000₺', priceMin: 500, priceMax: 1000 },
+  { label: '1000+₺', priceMin: 1000 },
+];
 
 interface FilterSheetProps {
   visible: boolean;
-  filters: ProductFilters;
+  filters: FeedQueryFilters;
   onClose: () => void;
-  onApply: (filters: ProductFilters) => void;
+  onApply: (filters: FeedQueryFilters) => void;
 }
 
 interface ChipGroupProps<T extends string> {
@@ -82,7 +102,7 @@ export default function FilterSheet({
   onClose,
   onApply,
 }: FilterSheetProps) {
-  const [draft, setDraft] = useState<ProductFilters>(filters);
+  const [draft, setDraft] = useState<FeedQueryFilters>(filters);
 
   useEffect(() => {
     if (visible) {
@@ -91,16 +111,39 @@ export default function FilterSheet({
   }, [filters, visible]);
 
   const handleClear = (): void => {
-    setDraft({ query: filters.query });
+    setDraft({});
   };
 
   const handleApply = (): void => {
-    onApply({
-      ...draft,
-      query: filters.query,
-    });
+    onApply(draft);
     onClose();
   };
+
+  const activePriceKey = (() => {
+    for (const preset of PRICE_PRESETS) {
+      if (
+        draft.priceMin === preset.priceMin &&
+        draft.priceMax === preset.priceMax
+      ) {
+        return preset.label;
+      }
+      if (
+        preset.priceMin === undefined &&
+        draft.priceMin === undefined &&
+        draft.priceMax === preset.priceMax
+      ) {
+        return preset.label;
+      }
+      if (
+        preset.priceMax === undefined &&
+        draft.priceMax === undefined &&
+        draft.priceMin === preset.priceMin
+      ) {
+        return preset.label;
+      }
+    }
+    return null;
+  })();
 
   return (
     <Modal
@@ -122,20 +165,91 @@ export default function FilterSheet({
             label="Kategori"
             options={CATEGORY_CHIPS}
             selected={draft.category ?? null}
-            onSelect={(category) => setDraft((current) => ({ ...current, category }))}
+            onSelect={(category) =>
+              setDraft((current) => {
+                const next = { ...current };
+                if (category === null) delete next.category;
+                else next.category = category;
+                return next;
+              })
+            }
           />
           <ChipGroup
-            label="Cinsiyet"
-            options={GENDER_CHIPS}
-            selected={draft.gender ?? null}
-            onSelect={(gender) => setDraft((current) => ({ ...current, gender }))}
+            label="Renk"
+            options={COLOR_CHIPS}
+            selected={draft.color ?? null}
+            onSelect={(color) =>
+              setDraft((current) => {
+                const next = { ...current };
+                if (color === null) delete next.color;
+                else next.color = color;
+                return next;
+              })
+            }
           />
           <ChipGroup
-            label="Beden"
-            options={SIZE_CHIPS.map((size) => ({ value: size, label: size }))}
-            selected={draft.size ?? null}
-            onSelect={(size) => setDraft((current) => ({ ...current, size }))}
+            label="Stil"
+            options={STYLE_CHIPS.map((style) => ({
+              value: style,
+              label: style,
+            }))}
+            selected={draft.style ?? null}
+            onSelect={(style) =>
+              setDraft((current) => {
+                const next = { ...current };
+                if (style === null) delete next.style;
+                else next.style = style;
+                return next;
+              })
+            }
           />
+          <View style={styles.group}>
+            <Text style={styles.groupLabel}>Fiyat</Text>
+            <View style={styles.chipRow}>
+              {PRICE_PRESETS.map((preset) => {
+                const isActive = activePriceKey === preset.label;
+                return (
+                  <Pressable
+                    key={preset.label}
+                    onPress={() =>
+                      setDraft((current) => {
+                        const next = { ...current };
+                        if (isActive) {
+                          delete next.priceMin;
+                          delete next.priceMax;
+                          return next;
+                        }
+                        if (preset.priceMin !== undefined) {
+                          next.priceMin = preset.priceMin;
+                        } else {
+                          delete next.priceMin;
+                        }
+                        if (preset.priceMax !== undefined) {
+                          next.priceMax = preset.priceMax;
+                        } else {
+                          delete next.priceMax;
+                        }
+                        return next;
+                      })
+                    }
+                    style={[styles.chip, isActive ? styles.chipActive : null]}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: isActive }}
+                    accessibilityLabel={preset.label}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        isActive ? styles.chipTextActive : null,
+                      ]}
+                    >
+                      {preset.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
           <View style={styles.actions}>
             <PressableScale
               onPress={handleClear}

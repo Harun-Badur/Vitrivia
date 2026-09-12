@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
+  Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -7,10 +9,11 @@ import {
   View,
   type LayoutChangeEvent,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Search, SlidersHorizontal } from 'lucide-react-native';
+import { Search, SlidersHorizontal, X } from 'lucide-react-native';
 import {
   runOnUI,
   useSharedValue,
@@ -24,13 +27,25 @@ import SwipeCard, {
 } from '../../components/SwipeCard';
 import PressableScale from '../../components/PressableScale';
 import FilterSheet from '../../components/FilterSheet';
-import SearchResults from '../../components/SearchResults';
 import SkeletonShimmer from '../../components/SkeletonShimmer';
 import SwipeHintOverlay from '../../components/SwipeHintOverlay';
 import VirtualTryOnModal from '../../components/VirtualTryOnModal';
 import { useAuthContext } from '../../hooks/useAuthContext';
 import { logger } from '../../lib/logger';
 import { track, trackFeedImpression } from '../../lib/analytics';
+import {
+  countActiveFilters,
+  EMPTY_FEED_QUERY,
+  facetChipsOnly,
+  feedQueryFromFilters,
+  removeFacet,
+  SEARCH_HISTORY_KEY,
+  SEARCH_HISTORY_LIMIT,
+  type FeedQuery,
+  type FeedQueryFacetKey,
+  type FeedQueryFilters,
+} from '../../lib/feedQuery';
+import { parseSearchQuery } from '../../lib/searchQueryParse';
 import { setSessionFilters, setSessionQuery } from '../../lib/sessionIntent';
 import { hasSeenSwipeHint, markSwipeHintSeen } from '../../lib/onboarding';
 import {
@@ -47,10 +62,7 @@ import {
   getRedirectLabel,
   openProductPage,
 } from '../../services/deeplinkService';
-import {
-  filterProducts,
-  type ProductFilters,
-} from '../../services/productService';
+import { DEFAULT_SEARCH_BRANDS } from '../../lib/searchQueryParse';
 import { useAppStore } from '../../store/useAppStore';
 import { getProductImages, type Product } from '../../types/product';
 import type { FeedMode } from '../../types/recommendation';
@@ -135,6 +147,7 @@ export default function FeedScreen() {
   const loadFeed = useAppStore((state) => state.loadFeed);
   const setFeedMode = useAppStore((state) => state.setFeedMode);
   const feedMode = useAppStore((state) => state.feedMode);
+  const feedFallback = useAppStore((state) => state.feedFallback);
   const swipeRight = useAppStore((state) => state.swipeRight);
   const swipeLeft = useAppStore((state) => state.swipeLeft);
   const undoPass = useAppStore((state) => state.undoPass);
@@ -176,9 +189,51 @@ export default function FeedScreen() {
   const userId = user?.id ?? null;
   const canLike = user !== null;
 
+  const [feedQuery, setFeedQuery] = useState<FeedQuery>(EMPTY_FEED_QUERY);
+  const [searchInput, setSearchInput] = useState('');
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
+  const feedQueryRef = useRef(feedQuery);
+  feedQueryRef.current = feedQuery;
+
   const reloadFeed = useCallback((): void => {
-    void loadFeed(userId);
+    const q = feedQueryRef.current;
+    void loadFeed(userId, {
+      filters: q.filters,
+      searchMode: q.mode === 'search',
+    });
   }, [loadFeed, userId]);
+
+  const applyFeedQuery = useCallback(
+    (next: FeedQuery, options?: { inputText?: string }): void => {
+      setFeedQuery(next);
+      if (options?.inputText !== undefined) {
+        setSearchInput(options.inputText);
+      }
+      setSessionFilters({
+        category: next.filters.category ?? null,
+        gender: null,
+        size: null,
+      });
+      const textParts = [
+        next.filters.text,
+        next.filters.style,
+        next.filters.color,
+        next.filters.brand,
+      ]
+        .filter((part): part is string => Boolean(part && part.trim()))
+        .join(' ');
+      if (textParts.length > 0) {
+        setSessionQuery(textParts);
+      }
+      void loadFeed(userId, {
+        filters: next.filters,
+        searchMode: next.mode === 'search',
+      });
+    },
+    [loadFeed, userId],
+  );
 
   const handleFeedModeChange = useCallback(
     (mode: FeedMode): void => {
@@ -186,14 +241,54 @@ export default function FeedScreen() {
         return;
       }
       setFeedMode(mode);
-      void loadFeed(userId);
+      const q = feedQueryRef.current;
+      void loadFeed(userId, {
+        filters: q.filters,
+        searchMode: q.mode === 'search',
+      });
     },
     [feedMode, loadFeed, setFeedMode, userId],
   );
 
   useEffect(() => {
     reloadFeed();
-  }, [reloadFeed]);
+    // Initial personal load only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+
+  useEffect(() => {
+    let mounted = true;
+    void AsyncStorage.getItem(SEARCH_HISTORY_KEY).then((raw) => {
+      if (!mounted || !raw) return;
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        if (
+          Array.isArray(parsed) &&
+          parsed.every((item) => typeof item === 'string')
+        ) {
+          setSearchHistory(parsed.slice(0, SEARCH_HISTORY_LIMIT));
+        }
+      } catch {
+        // ignore corrupt history
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const pushSearchHistory = useCallback(async (query: string): Promise<void> => {
+    const trimmed = query.trim();
+    if (trimmed.length === 0) return;
+    setSearchHistory((prev) => {
+      const next = [
+        trimmed,
+        ...prev.filter((item) => item.toLocaleLowerCase('tr-TR') !== trimmed.toLocaleLowerCase('tr-TR')),
+      ].slice(0, SEARCH_HISTORY_LIMIT);
+      void AsyncStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
 
   // Prefetch budget: current card all images (cap 6); next/warm only images[0].
   useEffect(() => {
@@ -263,10 +358,8 @@ export default function FeedScreen() {
   const [tryOnProduct, setTryOnProduct] = useState<Product | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [hintStatus, setHintStatus] = useState<HintStatus>('checking');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isFilterOpen, setIsFilterOpen] = useState(false);
-  const [filters, setFilters] = useState<ProductFilters>({});
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const currentProductsRef = useRef(currentProducts);
   currentProductsRef.current = currentProducts;
@@ -282,21 +375,75 @@ export default function FeedScreen() {
   );
 
   const handleApplyFilters = useCallback(
-    (next: ProductFilters): void => {
-      setFilters(next);
-      setSessionFilters({
-        category: next.category ?? null,
-        gender: next.gender ?? null,
-        size: next.size ?? null,
-      });
+    (next: FeedQueryFilters): void => {
+      const merged: FeedQueryFilters = { ...next };
+      // Preserve free-text from bar parse unless panel overwrote facets only.
+      if (!merged.text && feedQueryRef.current.filters.text) {
+        // Panel does not edit text; keep existing text facet if any.
+        merged.text = feedQueryRef.current.filters.text;
+      }
       track('filter', null, {
-        category: next.category ?? null,
-        gender: next.gender ?? null,
-        size: next.size ?? null,
+        category: merged.category ?? null,
+        color: merged.color ?? null,
+        brand: merged.brand ?? null,
+        style: merged.style ?? null,
+        price_min: merged.priceMin ?? null,
+        price_max: merged.priceMax ?? null,
       });
-      void loadFeed(userId);
+      applyFeedQuery(feedQueryFromFilters(merged));
     },
-    [loadFeed, userId],
+    [applyFeedQuery],
+  );
+
+  const commitSearchText = useCallback(
+    (raw: string): void => {
+      const trimmed = raw.trim();
+      if (trimmed.length === 0) {
+        applyFeedQuery(EMPTY_FEED_QUERY, { inputText: '' });
+        return;
+      }
+      const parsed = parseSearchQuery(trimmed, { brands: DEFAULT_SEARCH_BRANDS });
+      // Merge with panel-only facets that NL didn't set? Prefer NL as full replace
+      // of searchable state so bar + panel stay one source after commit.
+      const next = feedQueryFromFilters(parsed.filters);
+      applyFeedQuery(next, { inputText: trimmed });
+      void pushSearchHistory(trimmed);
+      track('search', null, {
+        query: trimmed,
+        category: parsed.filters.category ?? null,
+        color: parsed.filters.color ?? null,
+        result_count: null,
+      });
+    },
+    [applyFeedQuery, pushSearchHistory],
+  );
+
+  const handleSearchChange = useCallback(
+    (value: string): void => {
+      setSearchInput(value);
+      if (searchDebounceRef.current !== null) {
+        clearTimeout(searchDebounceRef.current);
+      }
+      searchDebounceRef.current = setTimeout(() => {
+        commitSearchText(value);
+      }, SEARCH_TRACK_DEBOUNCE_MS);
+    },
+    [commitSearchText],
+  );
+
+  const handleClearSearch = useCallback((): void => {
+    if (searchDebounceRef.current !== null) {
+      clearTimeout(searchDebounceRef.current);
+    }
+    applyFeedQuery(EMPTY_FEED_QUERY, { inputText: '' });
+  }, [applyFeedQuery]);
+
+  const handleRemoveFacet = useCallback(
+    (key: FeedQueryFacetKey): void => {
+      const nextFilters = removeFacet(feedQueryRef.current.filters, key);
+      applyFeedQuery(feedQueryFromFilters(nextFilters));
+    },
+    [applyFeedQuery],
   );
 
   useEffect(() => {
@@ -433,38 +580,21 @@ export default function FeedScreen() {
   // Katalogda ürün var ama hepsi beğenildi/geçildi: tekrar yüklemek işe yaramaz.
   const isCatalogExhausted = !hasDeck && seenCount > 0;
   const isLoading = feedStatus === 'loading' || feedStatus === 'idle';
-  const isSearching = searchQuery.trim().length > 0;
-  const activeFilterCount = [filters.category, filters.gender, filters.size]
-    .filter((value) => value !== null && value !== undefined && value !== '')
-    .length;
-  const searchResults = useMemo(
-    () =>
-      filterProducts(currentProducts, {
-        ...filters,
-        query: searchQuery,
-      }),
-    [currentProducts, filters, searchQuery],
+  const isSearchMode = feedQuery.mode === 'search';
+  const activeFilterCount = countActiveFilters(feedQuery.filters);
+  const facetChips = useMemo(
+    () => facetChipsOnly(feedQuery.filters),
+    [feedQuery.filters],
   );
+  const showFallbackBanner = isSearchMode && feedFallback;
 
   useEffect(() => {
-    const query = searchQuery.trim();
-    if (query.length === 0) {
-      return;
-    }
-    const timeoutId = setTimeout(() => {
-      setSessionQuery(query);
-      track('search', null, {
-        query,
-        result_count: filterProducts(currentProducts, {
-          ...filters,
-          query,
-        }).length,
-      });
-    }, SEARCH_TRACK_DEBOUNCE_MS);
     return () => {
-      clearTimeout(timeoutId);
+      if (searchDebounceRef.current !== null) {
+        clearTimeout(searchDebounceRef.current);
+      }
     };
-  }, [currentProducts, filters, searchQuery]);
+  }, []);
 
   return (
     <View
@@ -486,8 +616,11 @@ export default function FeedScreen() {
         <View style={styles.searchBar}>
           <Search color={colors.icon} size={18} />
           <TextInput
-            value={searchQuery}
-            onChangeText={setSearchQuery}
+            value={searchInput}
+            onChangeText={handleSearchChange}
+            onFocus={() => setSearchFocused(true)}
+            onBlur={() => setSearchFocused(false)}
+            onSubmitEditing={() => commitSearchText(searchInput)}
             placeholder="Ne arıyorsun?"
             placeholderTextColor={colors.placeholder}
             style={styles.searchInput}
@@ -496,6 +629,16 @@ export default function FeedScreen() {
             returnKeyType="search"
             accessibilityLabel="Ürün ara"
           />
+          {isSearchMode || searchInput.trim().length > 0 ? (
+            <PressableScale
+              onPress={handleClearSearch}
+              style={styles.clearHit}
+              accessibilityRole="button"
+              accessibilityLabel="Aramayı temizle"
+            >
+              <X color={colors.icon} size={16} />
+            </PressableScale>
+          ) : null}
           <View style={styles.searchDivider} />
           <PressableScale
             onPress={() => setIsFilterOpen(true)}
@@ -507,6 +650,56 @@ export default function FeedScreen() {
             {activeFilterCount > 0 ? <View style={styles.filterDot} /> : null}
           </PressableScale>
         </View>
+        {searchFocused && searchHistory.length > 0 && !isSearchMode ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.historyRow}
+            contentContainerStyle={styles.chipRowContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            {searchHistory.map((item) => (
+              <Pressable
+                key={item}
+                onPress={() => {
+                  setSearchInput(item);
+                  commitSearchText(item);
+                }}
+                style={styles.historyChip}
+                accessibilityRole="button"
+                accessibilityLabel={`Geçmiş arama ${item}`}
+              >
+                <Text style={styles.historyChipText}>{item}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
+        {isSearchMode ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.chipRow}
+            contentContainerStyle={styles.chipRowContent}
+          >
+            <View style={styles.countChip}>
+              <Text style={styles.countChipText}>
+                {currentProducts.length} sonuç
+              </Text>
+            </View>
+            {facetChips.map((chip) => (
+              <Pressable
+                key={`${chip.key}:${chip.label}`}
+                onPress={() => handleRemoveFacet(chip.key)}
+                style={styles.facetChip}
+                accessibilityRole="button"
+                accessibilityLabel={`${chip.label} filtresini kaldır`}
+              >
+                <Text style={styles.facetChipText}>{chip.label}</Text>
+                <X color={colors.textSecondary} size={12} />
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
         <View style={styles.segmentWrap}>
           <FeedModeSegment value={feedMode} onChange={handleFeedModeChange} />
         </View>
@@ -517,17 +710,16 @@ export default function FeedScreen() {
           { paddingBottom: layout.deckPadding + discoverCardLiftPx },
         ]}
       >
-        {isSearching ? (
-          <View style={styles.searchResults}>
-            <SearchResults
-              products={searchResults}
-              onAdd={handleSwipeRight}
-              onOpenStore={handleBuy}
-            />
+        {showFallbackBanner ? (
+          <View style={styles.fallbackBanner}>
+            <Text style={styles.fallbackBannerText}>
+              Eşleşme yok — benzerlerini gösteriyoruz
+            </Text>
           </View>
-        ) : isLoading ? (
+        ) : null}
+        {isLoading ? (
           <LoadingFeed />
-        ) : isCatalogExhausted ? (
+        ) : isCatalogExhausted && !isSearchMode ? (
           <DeckFinishedCard
             subtitle="Katalogdaki her şeyi gördün. Yeni ürünler eklendikçe burada belirir."
             onRefresh={reloadFeed}
@@ -535,8 +727,12 @@ export default function FeedScreen() {
           />
         ) : !hasDeck ? (
           <DeckFinishedCard
-            subtitle="Beğendiğin parçalar dolabına eklendi. Yeni öneriler yakında."
-            onRefresh={reloadFeed}
+            subtitle={
+              isSearchMode
+                ? 'Bu aramayla eşleşen ürün yok. Filtreleri gevşet veya temizle.'
+                : 'Beğendiğin parçalar dolabına eklendi. Yeni öneriler yakında.'
+            }
+            onRefresh={isSearchMode ? handleClearSearch : reloadFeed}
             onOpenLiked={handleOpenLiked}
           />
         ) : (
@@ -572,13 +768,13 @@ export default function FeedScreen() {
       </View>
       {hintStatus === 'visible' &&
       !isLoading &&
-      !isSearching &&
+      !isSearchMode &&
       hasDeck ? (
         <SwipeHintOverlay onDismiss={handleDismissHint} />
       ) : null}
       <FilterSheet
         visible={isFilterOpen}
-        filters={filters}
+        filters={feedQuery.filters}
         onClose={() => setIsFilterOpen(false)}
         onApply={handleApplyFilters}
       />
@@ -671,9 +867,77 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     justifyContent: 'center',
   },
-  searchResults: {
-    flex: 1,
-    alignSelf: 'stretch',
+  clearHit: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chipRow: {
+    marginTop: spacing.sm,
+    maxHeight: 36,
+  },
+  historyRow: {
+    marginTop: spacing.sm,
+    maxHeight: 36,
+  },
+  chipRowContent: {
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingRight: spacing.sm,
+  },
+  countChip: {
+    backgroundColor: colors.accentSoft,
+    borderRadius: radius.chip,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  countChipText: {
+    color: colors.accentDark,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  facetChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.chip,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  facetChipText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  historyChip: {
+    backgroundColor: colors.input,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.chip,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  historyChipText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  fallbackBanner: {
+    marginBottom: spacing.sm,
+    backgroundColor: colors.accentSoft,
+    borderRadius: radius.button,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  fallbackBannerText: {
+    color: colors.accentDark,
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   /** Reels viewport: H = onLayout; offscreen pages clip dışında. Peek band yok. */
   // Prevent container bg bleed through card radius during pager transition

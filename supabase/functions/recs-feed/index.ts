@@ -11,6 +11,11 @@ import {
 } from '../_shared/config.ts';
 import { rerankForDiversity } from '../_shared/diversity.ts';
 import {
+  applyFilterMaskProgressive,
+  hasStructuredFilters,
+  parseStructuredFilters,
+} from '../_shared/feedFilter.ts';
+import {
   applyFeedMode,
   DEFAULT_RECS_CONFIG,
   emptySessionIntent,
@@ -341,6 +346,10 @@ Deno.serve(async (request: Request): Promise<Response> => {
       : DEFAULT_LIMIT;
   const intent = parseIntent(payload.intent);
   const mode: FeedMode = isFeedMode(payload.mode) ? payload.mode : 'personal';
+  const structuredFilters = parseStructuredFilters(payload.filters);
+  if (structuredFilters.category && !intent.constraints.category) {
+    intent.constraints.category = structuredFilters.category;
+  }
 
   try {
     const impressionSince = new Date(
@@ -527,8 +536,36 @@ Deno.serve(async (request: Request): Promise<Response> => {
       nowMs,
       user.id,
     );
+
+    const byId = new Map(filtered.map((item) => [item.candidate.id, item.product]));
+
+    const scoredWithProduct = scored.flatMap((entry) => {
+      const product = byId.get(entry.candidate.id);
+      if (!product) {
+        return [];
+      }
+      return [{ entry, product }];
+    });
+
+    const masked = hasStructuredFilters(structuredFilters)
+      ? applyFilterMaskProgressive(
+          scoredWithProduct,
+          structuredFilters,
+          (row) => ({
+            id: row.entry.candidate.id,
+            brand: row.entry.candidate.brand,
+            category: row.entry.candidate.category,
+            colors: row.entry.candidate.colors,
+            price: row.entry.candidate.price,
+            title: row.product.title,
+            garmentDescription: row.product.garmentDescription,
+            subcategory: row.entry.candidate.subcategory,
+          }),
+        )
+      : { items: scoredWithProduct, fallback: false, dropped: [] as string[] };
+
     const ranked = rerankForDiversity(
-      scored,
+      masked.items.map((row) => row.entry),
       intent,
       rankedConfig,
       profile,
@@ -536,7 +573,6 @@ Deno.serve(async (request: Request): Promise<Response> => {
       nowMs,
     );
 
-    const byId = new Map(filtered.map((item) => [item.candidate.id, item.product]));
     const items = ranked.flatMap((entry) => {
       const product = byId.get(entry.candidate.id);
       if (!product) {
@@ -558,6 +594,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
         msg: 'recs-feed',
         ms: elapsedMs,
         n: items.length,
+        fallback: masked.fallback,
         config_version: rankedConfig.configVersion,
       }),
     );
@@ -567,6 +604,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
       score_id: crypto.randomUUID(),
       config_version: rankedConfig.configVersion,
       items,
+      fallback: masked.fallback,
     });
   } catch (error) {
     console.error('recs-feed başarısız', {

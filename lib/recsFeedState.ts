@@ -3,8 +3,11 @@ import {
   type FeedMode,
 } from '../types/recommendation';
 
+/** Ranking modes plus search for impression telemetry only. */
+export type TelemetryFeedMode = FeedMode | 'search';
+
 let lastRecommendationId: string | null = null;
-let lastFeedMode: FeedMode = DEFAULT_FEED_MODE;
+let lastFeedMode: TelemetryFeedMode = DEFAULT_FEED_MODE;
 
 export const setLastRecommendationId = (id: string | null): void => {
   lastRecommendationId = id;
@@ -12,8 +15,8 @@ export const setLastRecommendationId = (id: string | null): void => {
 
 export const getLastRecommendationId = (): string | null => lastRecommendationId;
 
-export const setLastFeedMode = (mode: FeedMode): void => {
+export const setLastFeedMode = (mode: TelemetryFeedMode): void => {
   lastFeedMode = mode;
 };
 
-export const getLastFeedMode = (): FeedMode => lastFeedMode;
+export const getLastFeedMode = (): TelemetryFeedMode => lastFeedMode;

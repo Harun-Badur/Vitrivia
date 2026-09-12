@@ -206,4 +206,6 @@ export interface RecsFeedResponse {
   score_id: string;
   config_version: string;
   items: RecsFeedItem[];
+  /** True when soft filters were progressively relaxed. */
+  fallback?: boolean;
 }

@@ -2,6 +2,9 @@ import { MOCK_PRODUCTS } from '../data/mockProducts';
 import { track } from '../lib/analytics';
 import { buildAffiliateUrl } from '../lib/deeplink';
 import { rerankForDiversity } from '../lib/diversity';
+import { applyFilterMaskProgressive } from '../lib/feedFilter';
+import type { FeedQueryFilters } from '../lib/feedQuery';
+import { hasAnyFilter } from '../lib/feedQuery';
 import { logger } from '../lib/logger';
 import { parseOptionalNumeric } from '../lib/price';
 import { inferProductAttributes } from '../lib/productAttributes';
@@ -37,6 +40,8 @@ export interface FetchFeedProductsResult {
   source: FeedSource;
   isPersonalized: boolean;
   recommendationId?: string;
+  /** Soft filter progressive relax from edge/local. */
+  fallback?: boolean;
 }
 
 const DEFAULT_FEED_LIMIT = 20;
@@ -324,6 +329,7 @@ const parseFeedResponse = (value: unknown): RecsFeedResponse | null => {
     score_id: value.score_id,
     config_version: value.config_version,
     items,
+    fallback: value.fallback === true,
   };
 };
 
@@ -477,6 +483,7 @@ const fetchEdgeFeed = async (
   intent: SessionIntent,
   limit: number,
   mode: FeedMode,
+  filters: FeedQueryFilters = {},
 ): Promise<RecsFeedResponse | null> => {
   const url = getRecsFeedUrl();
   const client = getSupabaseClient();
@@ -506,6 +513,7 @@ const fetchEdgeFeed = async (
         limit,
         intent,
         mode,
+        filters: hasAnyFilter(filters) ? filters : undefined,
       }),
       signal: controller.signal,
     });
@@ -530,20 +538,26 @@ export const fetchFeedProducts = async (
   limit = DEFAULT_FEED_LIMIT,
   userId: string | null = null,
   mode: FeedMode = DEFAULT_FEED_MODE,
+  filters: FeedQueryFilters = {},
+  telemetryMode?: 'personal' | 'trend' | 'search',
 ): Promise<FetchFeedProductsResult> => {
   const startedAt = Date.now();
   const intent = userId ? buildIntent() : emptySessionIntent();
+  if (filters.category && !intent.constraints.category) {
+    intent.constraints.category = filters.category;
+  }
   setLastRecommendationId(null);
-  setLastFeedMode(mode);
+  setLastFeedMode(telemetryMode ?? mode);
 
   if (userId) {
-    const edge = await fetchEdgeFeed(userId, intent, limit, mode);
+    const edge = await fetchEdgeFeed(userId, intent, limit, mode, filters);
     if (edge) {
       setLastRecommendationId(edge.recommendation_id);
       logger.debug('recs-feed timing', {
         ms: Date.now() - startedAt,
         source: 'edge',
         n: edge.items.length,
+        fallback: edge.fallback === true,
       });
       const edgeProducts = neverEmpty(edge.items.map((item) => item.product));
       return {
@@ -551,6 +565,7 @@ export const fetchFeedProducts = async (
         source: 'edge',
         isPersonalized: true,
         recommendationId: edge.recommendation_id,
+        fallback: edge.fallback === true,
       };
     }
 
@@ -568,35 +583,61 @@ export const fetchFeedProducts = async (
     };
   }
 
+  const applyLocalFilters = (
+    products: Product[],
+  ): { products: Product[]; fallback: boolean } => {
+    if (!hasAnyFilter(filters)) {
+      return { products, fallback: false };
+    }
+    const masked = applyFilterMaskProgressive(products, filters, (p) => p);
+    return { products: masked.items, fallback: masked.fallback };
+  };
+
   if (!userId) {
-    const catalogSlice = catalog.slice(0, limit);
+    const filtered = applyLocalFilters(catalog);
+    const catalogSlice = (filtered.products.length > 0
+      ? filtered.products
+      : catalog
+    ).slice(0, limit);
     return {
       products: catalogSlice,
       source: 'supabase',
       isPersonalized: false,
+      fallback: filtered.fallback,
     };
   }
 
   try {
-    const ranked = await rankLocally(catalog, userId, intent, limit, mode);
+    const ranked = await rankLocally(catalog, userId, intent, limit * 3, mode);
+    const filtered = applyLocalFilters(ranked);
+    const sliced = (filtered.products.length > 0
+      ? filtered.products
+      : ranked
+    ).slice(0, limit);
     logger.debug('recs-feed timing', {
       ms: Date.now() - startedAt,
       source: 'supabase',
-      n: ranked.length,
+      n: sliced.length,
+      fallback: filtered.fallback,
     });
     return {
-      products: ranked,
+      products: neverEmpty(sliced),
       source: 'supabase',
       isPersonalized: true,
+      fallback: filtered.fallback,
     };
   } catch (error) {
     logger.debug('Yerel skorlama düştü; katalog sırası kullanılıyor', { error });
     track('feed_fallback', null, { reason: 'local_rank_failed' });
-    const fallbackProducts = neverEmpty(catalog.slice(0, limit));
+    const filtered = applyLocalFilters(catalog);
+    const fallbackProducts = neverEmpty(
+      (filtered.products.length > 0 ? filtered.products : catalog).slice(0, limit),
+    );
     return {
       products: fallbackProducts,
       source: 'supabase',
       isPersonalized: false,
+      fallback: filtered.fallback,
     };
   }
 };
@@ -606,6 +647,12 @@ export interface ProductFilters {
   category?: GarmentCategory | null;
   gender?: ProductGender | null;
   size?: string | null;
+  color?: string | null;
+  priceMin?: number | null;
+  priceMax?: number | null;
+  brand?: string | null;
+  style?: string | null;
+  text?: string | null;
 }
 
 const GENDER_MEN_TOKENS = ['erkek', 'oğlan', 'oglan'] as const;
