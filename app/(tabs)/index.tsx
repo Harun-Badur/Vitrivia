@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -35,11 +33,8 @@ import { track, trackFeedImpression } from '../../lib/analytics';
 import {
   countActiveFilters,
   EMPTY_FEED_QUERY,
-  facetChipsOnly,
   feedQueryFromFilters,
-  removeFacet,
   type FeedQuery,
-  type FeedQueryFacetKey,
   type FeedQueryFilters,
 } from '../../lib/feedQuery';
 import { parseSearchQuery } from '../../lib/searchQueryParse';
@@ -400,14 +395,6 @@ export default function FeedScreen() {
     applyFeedQuery(EMPTY_FEED_QUERY, { inputText: '' });
   }, [applyFeedQuery]);
 
-  const handleRemoveFacet = useCallback(
-    (key: FeedQueryFacetKey): void => {
-      const nextFilters = removeFacet(feedQueryRef.current.filters, key);
-      applyFeedQuery(feedQueryFromFilters(nextFilters));
-    },
-    [applyFeedQuery],
-  );
-
   useEffect(() => {
     let isMounted = true;
     void hasSeenSwipeHint().then((seen) => {
@@ -544,10 +531,6 @@ export default function FeedScreen() {
   const isLoading = feedStatus === 'loading' || feedStatus === 'idle';
   const isSearchMode = feedQuery.mode === 'search';
   const activeFilterCount = countActiveFilters(feedQuery.filters);
-  const facetChips = useMemo(
-    () => facetChipsOnly(feedQuery.filters),
-    [feedQuery.filters],
-  );
   const searchBannerText = useMemo(() => {
     if (!isSearchMode) {
       return null;
@@ -616,37 +599,11 @@ export default function FeedScreen() {
             {activeFilterCount > 0 ? <View style={styles.filterDot} /> : null}
           </PressableScale>
         </View>
-        {isSearchMode ? (
+        {isSearchMode && showSearchBanner && searchBannerText ? (
           <View style={styles.searchMetaBlock}>
-            {showSearchBanner && searchBannerText ? (
-              <View style={styles.fallbackBanner}>
-                <Text style={styles.fallbackBannerText}>{searchBannerText}</Text>
-              </View>
-            ) : null}
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.chipRow}
-              contentContainerStyle={styles.chipRowContent}
-            >
-              <View style={styles.countChip}>
-                <Text style={styles.countChipText}>
-                  {currentProducts.length} sonuç
-                </Text>
-              </View>
-              {facetChips.map((chip) => (
-                <Pressable
-                  key={`${chip.key}:${chip.label}`}
-                  onPress={() => handleRemoveFacet(chip.key)}
-                  style={styles.facetChip}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${chip.label} filtresini kaldır`}
-                >
-                  <Text style={styles.facetChipText}>{chip.label}</Text>
-                  <X color={colors.textSecondary} size={12} />
-                </Pressable>
-              ))}
-            </ScrollView>
+            <View style={styles.fallbackBanner}>
+              <Text style={styles.fallbackBannerText}>{searchBannerText}</Text>
+            </View>
           </View>
         ) : null}
         <View style={styles.segmentWrap}>
@@ -814,42 +771,6 @@ const styles = StyleSheet.create({
     height: 28,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  chipRow: {
-    marginTop: spacing.sm,
-    maxHeight: 36,
-  },
-  chipRowContent: {
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingRight: spacing.sm,
-  },
-  countChip: {
-    backgroundColor: colors.accentSoft,
-    borderRadius: radius.chip,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-  },
-  countChipText: {
-    color: colors.accentDark,
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  facetChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.chip,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-  },
-  facetChipText: {
-    color: colors.text,
-    fontSize: 12,
-    fontWeight: '700',
   },
   searchMetaBlock: {
     gap: spacing.xs,
