@@ -663,21 +663,7 @@ export default function VirtualTryOnModal({
 
     try {
       await insertLikedProduct(user.id, displayProduct);
-      useAppStore.setState((state) => {
-        if (state.likedProducts.some((item) => item.product.id === displayProduct.id)) {
-          return state;
-        }
-        return {
-          likedProducts: [
-            {
-              product: displayProduct,
-              notifyOnPriceDrop: true,
-              likedAt: new Date().toISOString(),
-            },
-            ...state.likedProducts,
-          ],
-        };
-      });
+      useAppStore.getState().addLikedProductLocally(displayProduct);
       setClosetAdded(true);
       showToast('Dolabına eklendi');
       track('dolap_add', displayProduct.id, { source: 'tryon' });
@@ -1051,7 +1037,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   backdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: colors.backdrop,
   },
   screen: {
@@ -1092,14 +1078,14 @@ const styles = StyleSheet.create({
     borderColor: colors.hairline,
   },
   canvasImage: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     zIndex: 2,
   },
   loadingDim: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: LOADING_DIM,
   },
   shimmerBand: {
@@ -1108,7 +1094,7 @@ const styles = StyleSheet.create({
     right: 0,
   },
   loadingCopy: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: spacing.xl,

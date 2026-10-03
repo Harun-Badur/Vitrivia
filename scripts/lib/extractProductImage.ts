@@ -413,6 +413,16 @@ export const extractProductImages = async (
   fallbackUrl: string,
 ): Promise<ExtractedProductImages> => {
   const { html, httpStatus } = await fetchProductHtml(productUrl);
+  return extractProductImagesFromHtml(html, provider, fallbackUrl, httpStatus);
+};
+
+/** Reuse gallery extraction after the caller's successful page fetch. */
+export const extractProductImagesFromHtml = (
+  html: string,
+  provider: FeedProvider,
+  fallbackUrl: string,
+  httpStatus: number,
+): ExtractedProductImages => {
   const $ = cheerio.load(html);
 
   const ogImages = collectOgImages($);

@@ -1,7 +1,4 @@
-import {
-  cacheDirectory,
-  downloadAsync,
-} from 'expo-file-system/legacy';
+import { cacheDirectory, downloadAsync } from 'expo-file-system/legacy';
 import { logger } from '../lib/logger';
 import { preparePersonJpegUri } from '../lib/personPhotoPrepare';
 import {
@@ -9,12 +6,10 @@ import {
   clampWeightKg,
   isGarmentSize,
   parseStyleTags,
+  parseStudioPreferences,
 } from '../lib/profileStudio';
 import { getRequiredSupabaseClient } from '../lib/supabase';
-import type {
-  StudioProfilePatch,
-  UserStudioProfile,
-} from '../types/profile';
+import type { StudioProfilePatch, UserStudioProfile } from '../types/profile';
 
 export const MODEL_PHOTOS_BUCKET = 'model-photos';
 const MODEL_PHOTO_FILENAME = 'model.jpg';
@@ -128,6 +123,12 @@ export const fetchStudioProfile = async (
   userId: string,
 ): Promise<UserStudioProfile> => {
   const client = getRequiredSupabaseClient();
+  const { data: auth, error: authError } = await client.auth.getUser();
+  if (authError || auth.user?.id !== userId)
+    throw new Error('Profil için geçerli oturum gerekli.');
+  const preferences = parseStudioPreferences(
+    auth.user.user_metadata.studio_preferences,
+  );
   const { data, error } = await client
     .from('profiles')
     .select(
@@ -142,15 +143,15 @@ export const fetchStudioProfile = async (
   }
 
   if (data === null) {
-    return emptyProfile(userId);
+    return { ...emptyProfile(userId), ...preferences };
   }
 
   if (!isProfileRow(data)) {
     logger.error('Profil satırı beklenen biçimde değil');
-    return emptyProfile(userId);
+    return { ...emptyProfile(userId), ...preferences };
   }
 
-  return mapRow(data);
+  return { ...mapRow(data), ...preferences };
 };
 
 export const upsertStudioProfile = async (
@@ -158,6 +159,41 @@ export const upsertStudioProfile = async (
   patch: StudioProfilePatch,
 ): Promise<UserStudioProfile> => {
   const client = getRequiredSupabaseClient();
+  const hasPreferences =
+    patch.favoriteBrands !== undefined ||
+    patch.preferredColors !== undefined ||
+    patch.priceRange !== undefined;
+  if (hasPreferences) {
+    const { data: auth, error: authError } = await client.auth.getUser();
+    if (authError || auth.user?.id !== userId)
+      throw new Error('Profil için geçerli oturum gerekli.');
+    if (
+      patch.priceRange !== undefined &&
+      patch.priceRange !== null &&
+      !parseStudioPreferences({ priceRange: patch.priceRange }).priceRange
+    )
+      throw new Error('Geçerli bir minimum ve maksimum fiyat seç.');
+    const preferences = parseStudioPreferences({
+      ...parseStudioPreferences(auth.user.user_metadata.studio_preferences),
+      ...(patch.favoriteBrands !== undefined && {
+        favoriteBrands: patch.favoriteBrands,
+      }),
+      ...(patch.preferredColors !== undefined && {
+        preferredColors: patch.preferredColors,
+      }),
+      ...(patch.priceRange !== undefined && { priceRange: patch.priceRange }),
+    });
+    const { error } = await client.auth.updateUser({
+      data: { studio_preferences: preferences },
+    });
+    if (error) throw new Error('Değişiklik kaydedilemedi. Lütfen tekrar dene.');
+    if (
+      Object.keys(patch).every((key) =>
+        ['favoriteBrands', 'preferredColors', 'priceRange'].includes(key),
+      )
+    )
+      return fetchStudioProfile(userId);
+  }
   const payload: Record<string, unknown> = {
     id: userId,
     updated_at: new Date().toISOString(),
@@ -204,9 +240,7 @@ export const upsertStudioProfile = async (
   return mapRow(data);
 };
 
-export const syncDeclaredStyleTags = async (
-  tags: string[],
-): Promise<void> => {
+export const syncDeclaredStyleTags = async (tags: string[]): Promise<void> => {
   try {
     const client = getRequiredSupabaseClient();
     const { error } = await client.rpc('sync_declared_style_tags', {

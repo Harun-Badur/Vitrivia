@@ -18,6 +18,10 @@ const CATEGORY_ALIASES: ReadonlyArray<{
   keys: readonly string[];
 }> = [
   { category: 'dresses', keys: ['elbise', 'elbiseler', 'dress', 'dresses'] },
+  { category: 'shoes', keys: ['ayakkabı', 'ayakkabılar', 'shoe', 'shoes', 'sneaker'] },
+  { category: 'bags', keys: ['çanta', 'çantalar', 'bag', 'bags'] },
+  { category: 'hats', keys: ['şapka', 'şapkalar', 'hat', 'hats'] },
+  { category: 'accessories', keys: ['aksesuar', 'aksesuarlar', 'accessory', 'accessories'] },
   {
     category: 'upper_body',
     keys: ['üst', 'ust', 'üst giyim', 'ust giyim', 'upper', 'tişört', 'tisort', 'bluz', 'blouse'],
@@ -32,16 +36,6 @@ const CATEGORY_ALIASES: ReadonlyArray<{
     keys: ['dış', 'dis', 'dış giyim', 'dis giyim', 'mont', 'ceket', 'kaban'],
   },
 ];
-
-/** Tokens that are category-like but not in DB enum → text remainder. */
-const UNSUPPORTED_CATEGORY_KEYS = [
-  'ayakkabı',
-  'ayakkabi',
-  'çanta',
-  'canta',
-  'shoes',
-  'bag',
-] as const;
 
 const STYLE_KEYS = [
   'midi',
@@ -134,14 +128,6 @@ const findCategory = (tokens: string[], index: number): GarmentCategory | null =
     }
   }
   return null;
-};
-
-const isUnsupportedCategory = (token: string): boolean => {
-  const n = normalize(token);
-  const f = fold(token);
-  return UNSUPPORTED_CATEGORY_KEYS.some(
-    (key) => normalize(key) === n || fold(key) === f,
-  );
 };
 
 const findStyle = (token: string): string | null => {
@@ -346,11 +332,6 @@ export const parseSearchQuery = (
       filters.category = category;
       consumed.add(i);
       matchedTokens.push(token);
-      continue;
-    }
-
-    if (isUnsupportedCategory(token)) {
-      // Keep as text remainder so user still gets some match signal.
       continue;
     }
 

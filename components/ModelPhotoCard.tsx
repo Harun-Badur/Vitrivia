@@ -150,7 +150,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   progressScrim: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: colors.inverseSurface,
     alignItems: 'center',
     justifyContent: 'center',

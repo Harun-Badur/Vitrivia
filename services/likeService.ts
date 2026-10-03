@@ -4,7 +4,7 @@ import { getRequiredSupabaseClient } from '../lib/supabase';
 import type { AuthUser } from '../types/auth';
 import {
   isProductSnapshot,
-  type FeedProvider,
+  isFeedProvider,
   type LikedProduct,
   type Product,
 } from '../types/product';
@@ -37,12 +37,6 @@ export interface UpdateLikeAlertParams {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
-const isFeedProvider = (value: unknown): value is FeedProvider =>
-  value === 'amazon' ||
-  value === 'trendyol' ||
-  value === 'hepsiburada' ||
-  value === 'mock';
-
 const toSnapshot = (product: Product): Product => ({
   id: product.id,
   imageUrl: product.imageUrl,
@@ -53,6 +47,7 @@ const toSnapshot = (product: Product): Product => ({
   lastPriceCheckedAt: product.lastPriceCheckedAt,
   brand: product.brand,
   category: product.category,
+  outfitRole: product.outfitRole,
   garmentDescription: product.garmentDescription,
   provider: isFeedProvider(product.provider) ? product.provider : undefined,
   productUrl: product.productUrl,

@@ -18,6 +18,11 @@ export const PROVIDER_REDIRECT_LABEL: Record<FeedProvider, string> = {
   hepsiburada: "Hepsiburada'ya",
   amazon: "Amazon'a",
   mock: 'mağazaya',
+  boyner: "Boyner'e",
+  mavi: "Mavi'ye",
+  lcw: "LCW'ye",
+  defacto: "DeFacto'ya",
+  flo: "FLO'ya",
 };
 
 interface AffiliateTags {
@@ -60,7 +65,7 @@ export const parseAffiliateTagsJson = (): AffiliateTags => {
 const buildFallbackProductUrl = (
   provider: FeedProvider,
   externalId: string,
-): string => {
+): string | null => {
   switch (provider) {
     case 'trendyol':
       return TRENDYOL_PRODUCT_URL.replace('{id}', encodeURIComponent(externalId));
@@ -73,6 +78,8 @@ const buildFallbackProductUrl = (
       return AMAZON_PRODUCT_URL.replace('{id}', encodeURIComponent(externalId));
     case 'mock':
       return TRENDYOL_PRODUCT_URL.replace('{id}', encodeURIComponent(externalId));
+    default:
+      return null;
   }
 };
 

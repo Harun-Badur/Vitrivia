@@ -1,6 +1,46 @@
-export type GarmentCategory = 'upper_body' | 'lower_body' | 'dresses';
+export const GARMENT_CATEGORIES = [
+  'upper_body',
+  'lower_body',
+  'dresses',
+  'shoes',
+  'bags',
+  'hats',
+  'accessories',
+] as const;
 
-export type FeedProvider = 'amazon' | 'trendyol' | 'hepsiburada' | 'mock';
+export type GarmentCategory = (typeof GARMENT_CATEGORIES)[number];
+
+export const isGarmentCategory = (value: unknown): value is GarmentCategory =>
+  typeof value === 'string' &&
+  (GARMENT_CATEGORIES as readonly string[]).includes(value);
+
+export const OUTFIT_ROLES = [
+  'top',
+  'bottom',
+  'outerwear',
+  'one_piece',
+  'shoes',
+  'bag',
+  'hat',
+  'accessory',
+] as const;
+
+export type OutfitRole = (typeof OUTFIT_ROLES)[number];
+
+export const isOutfitRole = (value: unknown): value is OutfitRole =>
+  typeof value === 'string' &&
+  (OUTFIT_ROLES as readonly string[]).includes(value);
+
+export const FEED_PROVIDERS = [
+  'amazon', 'trendyol', 'hepsiburada', 'mock',
+  'boyner', 'mavi', 'lcw', 'defacto', 'flo',
+] as const;
+
+export type FeedProvider = (typeof FEED_PROVIDERS)[number];
+
+export const isFeedProvider = (value: unknown): value is FeedProvider =>
+  typeof value === 'string' &&
+  (FEED_PROVIDERS as readonly string[]).includes(value);
 
 export type ProductGender = 'women' | 'men' | 'unisex';
 
@@ -22,6 +62,7 @@ export interface Product {
   createdAt?: string;
   brand: string;
   category: GarmentCategory;
+  outfitRole?: OutfitRole | null;
   garmentDescription: string;
   provider?: FeedProvider;
   productUrl?: string;
@@ -70,13 +111,14 @@ export const GARMENT_CATEGORY_LABEL: Record<GarmentCategory, string> = {
   upper_body: 'Üst Giyim',
   lower_body: 'Alt Giyim',
   dresses: 'Elbise',
+  shoes: 'Ayakkabı',
+  bags: 'Çanta',
+  hats: 'Şapka',
+  accessories: 'Aksesuar',
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
-
-const isGarmentCategory = (value: unknown): value is GarmentCategory =>
-  value === 'upper_body' || value === 'lower_body' || value === 'dresses';
 
 const isOptionalFiniteNumber = (value: unknown): boolean =>
   value === undefined ||
@@ -97,6 +139,7 @@ export const isProductSnapshot = (value: unknown): value is Product => {
     Number.isFinite(price) &&
     typeof value.brand === 'string' &&
     isGarmentCategory(value.category) &&
+    (value.outfitRole == null || isOutfitRole(value.outfitRole)) &&
     typeof value.garmentDescription === 'string' &&
     isOptionalFiniteNumber(value.currentPrice) &&
     isOptionalFiniteNumber(value.previousPrice)

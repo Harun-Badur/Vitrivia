@@ -1,0 +1,6 @@
+# Copy this file to a separate TSV and add one real product URL per line.
+# Columns (tab-separated): gender, category, brand_hint, product_url
+# gender: KADIN, ERKEK or UNISEX
+# category: upper_body, lower_body, dresses, shoes, bags, hats, accessories
+# Supported URL hosts: trendyol.com, hepsiburada.com
+# Run: npm run seed:expansion -- scripts/data/your_product_links.tsv

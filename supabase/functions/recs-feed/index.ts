@@ -69,6 +69,7 @@ interface RecsProductJson {
   createdAt?: string;
   brand: string;
   category: string;
+  outfitRole?: string | null;
   garmentDescription: string;
   provider?: string;
   productUrl?: string;
@@ -214,7 +215,15 @@ const parseStringArray = (value: unknown): string[] => {
 };
 
 const isGarmentCategory = (value: string): boolean =>
-  value === 'upper_body' || value === 'lower_body' || value === 'dresses';
+  value === 'upper_body' || value === 'lower_body' || value === 'dresses' ||
+  value === 'shoes' || value === 'bags' || value === 'hats' ||
+  value === 'accessories';
+
+const isOutfitRole = (value: unknown): value is string =>
+  typeof value === 'string' && [
+    'top', 'bottom', 'outerwear', 'one_piece',
+    'shoes', 'bag', 'hat', 'accessory',
+  ].includes(value);
 
 const parseWeightMap = (value: unknown): WeightMap => {
   if (!isRecord(value)) {
@@ -339,6 +348,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
   }
 
   const payload = isRecord(body) ? body : {};
+  const excludedIds = new Set(Array.isArray(payload.exclude_ids)
+    ? payload.exclude_ids.filter((id): id is string => typeof id === 'string') : []);
   const limitRaw = payload.limit;
   const limit =
     typeof limitRaw === 'number' && Number.isFinite(limitRaw)
@@ -356,7 +367,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
       Date.now() - IMPRESSION_WINDOW_DAYS * 86_400_000,
     ).toISOString();
 
-    const [config, profileResult, productsResult, attributesResult, impressionsResult] =
+    const [config, profileResult, productsResult, initialAttributesResult, impressionsResult] =
       await Promise.all([
         loadConfig(admin),
         admin
@@ -374,7 +385,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
         admin
           .from('product_attributes')
           .select(
-            'product_id, gender, colors, fit, subcategory, brand_slug, price_band',
+            'product_id, gender, colors, fit, subcategory, brand_slug, price_band, outfit_role',
           ),
         admin
           .from('user_events')
@@ -383,6 +394,16 @@ Deno.serve(async (request: Request): Promise<Response> => {
           .eq('event_type', 'impression')
           .gte('created_at', impressionSince),
       ]);
+
+    let attributesResult = initialAttributesResult;
+    if (
+      attributesResult.error &&
+      /column .*outfit_role.* does not exist/i.test(attributesResult.error.message)
+    ) {
+      attributesResult = await admin
+        .from('product_attributes')
+        .select('product_id, gender, colors, fit, subcategory, brand_slug, price_band');
+    }
 
     const profile = mapStyleProfileRow(
       profileResult.data && isProfileRow(profileResult.data)
@@ -417,6 +438,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
       if (!isRecord(row) || typeof row.id !== 'string') {
         continue;
       }
+      if (excludedIds.has(row.id)) continue;
       if (typeof row.category !== 'string' || !isGarmentCategory(row.category)) {
         continue;
       }
@@ -451,7 +473,15 @@ Deno.serve(async (request: Request): Promise<Response> => {
             ? 'elbise'
             : row.category === 'lower_body'
               ? 'pantolon'
-              : 'tisort';
+              : row.category === 'shoes'
+                ? 'ayakkabi'
+                : row.category === 'bags'
+                  ? 'canta'
+                  : row.category === 'hats'
+                    ? 'sapka'
+                    : row.category === 'accessories'
+                      ? 'aksesuar'
+                      : 'tisort';
       const brandSlug =
         attr && typeof attr.brand_slug === 'string'
           ? attr.brand_slug
@@ -483,6 +513,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
         createdAt,
         brand,
         category: row.category,
+        outfitRole: isOutfitRole(attr?.outfit_role) ? attr.outfit_role : null,
         garmentDescription,
         provider: row.provider,
         productUrl: row.product_url,
@@ -617,6 +648,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
       score_id: crypto.randomUUID(),
       config_version: rankedConfig.configVersion,
       items,
+      has_more: maskedRows.length > items.length,
       fallback: feedFallback,
       relaxed,
     });

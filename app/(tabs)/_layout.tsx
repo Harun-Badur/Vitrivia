@@ -2,13 +2,14 @@ import { useEffect } from 'react';
 import { BackHandler, StyleSheet } from 'react-native';
 import { Tabs, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Compass, Shirt, Sparkles, User } from 'lucide-react-native';
+import { Compass, Heart, Shirt, User } from 'lucide-react-native';
 import { TAB_TRANSITION_MS } from '../../lib/motion';
 import { colors, layout, spacing } from '../../lib/theme';
 
 const ACTIVE_COLOR = colors.accent;
 const INACTIVE_COLOR = colors.tabInactive;
-const ICON_SIZE = 22;
+const ICON_SIZE = 25;
+const TAB_CONTENT_HEIGHT = 46;
 
 export default function TabsLayout() {
   const router = useRouter();
@@ -42,7 +43,7 @@ export default function TabsLayout() {
         tabBarStyle: [
           styles.bar,
           {
-            height: layout.tabBarContentHeight + bottomInset,
+            height: TAB_CONTENT_HEIGHT + bottomInset,
             paddingBottom: bottomInset,
           },
         ],
@@ -66,10 +67,8 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="style"
         options={{
-          title: 'Stil',
-          tabBarIcon: ({ color }) => (
-            <Sparkles color={color} size={ICON_SIZE} />
-          ),
+          title: 'Favoriler',
+          tabBarIcon: ({ color }) => <Heart color={color} size={ICON_SIZE} />,
         }}
       />
       <Tabs.Screen
@@ -92,18 +91,20 @@ export default function TabsLayout() {
 
 const styles = StyleSheet.create({
   bar: {
-    backgroundColor: colors.bg,
+    backgroundColor: colors.input,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
     borderTopWidth: 1,
-    borderTopColor: colors.hairline,
-    paddingTop: spacing.sm,
+    borderTopColor: colors.border,
+    paddingTop: 4,
     paddingHorizontal: spacing.sm,
   },
   item: {
-    paddingVertical: 6,
+    paddingVertical: 1,
   },
   label: {
     fontSize: 11,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   scene: {
     backgroundColor: colors.bgSoft,

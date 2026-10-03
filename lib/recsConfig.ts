@@ -25,6 +25,7 @@ const PROFILE_STORAGE_PREFIX = 'kabin.recs.profile.v1.';
 interface CachedConfig {
   config: RecsScoringConfig;
   fetchedAt: number;
+  ttl?: number;
 }
 
 interface RecsConfigRow {
@@ -52,7 +53,10 @@ interface StyleProfileRow {
 }
 
 let memoryConfig: CachedConfig | null = null;
-const memoryProfiles = new Map<string, { profile: StyleProfileSnapshot; fetchedAt: number }>();
+const memoryProfiles = new Map<string, { profile: StyleProfileSnapshot; fetchedAt: number; ttl?: number }>();
+let cacheGeneration = 0;
+let configRequest: Promise<RecsScoringConfig> | null = null;
+const profileRequests = new Map<string, Promise<StyleProfileSnapshot>>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
@@ -270,9 +274,10 @@ const persistJson = async (key: string, value: unknown): Promise<void> => {
   }
 };
 
-export const fetchRecsConfig = async (): Promise<RecsScoringConfig> => {
+const readRecsConfig = async (): Promise<RecsScoringConfig> => {
+  const generation = cacheGeneration;
   const now = Date.now();
-  if (memoryConfig && now - memoryConfig.fetchedAt < CONFIG_CACHE_MS) {
+  if (memoryConfig && now - memoryConfig.fetchedAt < (memoryConfig.ttl ?? CONFIG_CACHE_MS)) {
     return memoryConfig.config;
   }
 
@@ -289,27 +294,34 @@ export const fetchRecsConfig = async (): Promise<RecsScoringConfig> => {
 
     if (configResult.error) {
       logger.debug('recs_config okunamadı', { detail: configResult.error.message });
-      return memoryConfig?.config ?? DEFAULT_RECS_CONFIG;
+      const config = memoryConfig?.config ?? DEFAULT_RECS_CONFIG;
+      if (generation === cacheGeneration) memoryConfig = { config, fetchedAt: now, ttl: 10_000 };
+      return config;
     }
 
     const rows = (configResult.data ?? []).filter(isConfigRow);
     const priorRows = (priorResult.data ?? []).filter(isPriorRow);
     const config = assembleRecsConfig(rows, priorRows);
-    memoryConfig = { config, fetchedAt: now };
-    void persistJson(CONFIG_STORAGE_KEY, { config, fetchedAt: now });
+    if (generation === cacheGeneration) {
+      memoryConfig = { config, fetchedAt: now };
+      void persistJson(CONFIG_STORAGE_KEY, { config, fetchedAt: now });
+    }
     return config;
   } catch (error) {
     logger.debug('recs_config beklenmeyen hata', { error });
-    return memoryConfig?.config ?? DEFAULT_RECS_CONFIG;
+    const config = memoryConfig?.config ?? DEFAULT_RECS_CONFIG;
+    if (generation === cacheGeneration) memoryConfig = { config, fetchedAt: now, ttl: 10_000 };
+    return config;
   }
 };
 
-export const fetchStyleProfileSnapshot = async (
+const readStyleProfileSnapshot = async (
   userId: string,
 ): Promise<StyleProfileSnapshot> => {
+  const generation = cacheGeneration;
   const now = Date.now();
   const cached = memoryProfiles.get(userId);
-  if (cached && now - cached.fetchedAt < CONFIG_CACHE_MS) {
+  if (cached && now - cached.fetchedAt < (cached.ttl ?? CONFIG_CACHE_MS)) {
     return cached.profile;
   }
 
@@ -330,24 +342,53 @@ export const fetchStyleProfileSnapshot = async (
 
     if (error) {
       logger.debug('user_style_profiles okunamadı', { detail: error.message });
-      return cached?.profile ?? fallback;
+      const profile = cached?.profile ?? fallback;
+      if (generation === cacheGeneration) memoryProfiles.set(userId, { profile, fetchedAt: now, ttl: 10_000 });
+      return profile;
     }
 
     if (data === null || !isProfileRow(data)) {
-      return cached?.profile ?? fallback;
+      const profile = cached?.profile ?? fallback;
+      if (generation === cacheGeneration) memoryProfiles.set(userId, { profile, fetchedAt: now, ttl: 60_000 });
+      return profile;
     }
 
     const profile = mapStyleProfileRow(data);
-    memoryProfiles.set(userId, { profile, fetchedAt: now });
-    void persistJson(`${PROFILE_STORAGE_PREFIX}${userId}`, profile);
+    if (generation === cacheGeneration) {
+      memoryProfiles.set(userId, { profile, fetchedAt: now });
+      void persistJson(`${PROFILE_STORAGE_PREFIX}${userId}`, profile);
+    }
     return profile;
   } catch (error) {
     logger.debug('user_style_profiles beklenmeyen hata', { error });
-    return cached?.profile ?? fallback;
+    const profile = cached?.profile ?? fallback;
+    if (generation === cacheGeneration) memoryProfiles.set(userId, { profile, fetchedAt: now, ttl: 10_000 });
+    return profile;
   }
 };
 
+export const fetchRecsConfig = (): Promise<RecsScoringConfig> => {
+  if (!configRequest) {
+    const request = readRecsConfig().finally(() => { if (configRequest === request) configRequest = null; });
+    configRequest = request;
+  }
+  return configRequest;
+};
+
+export const fetchStyleProfileSnapshot = (userId: string): Promise<StyleProfileSnapshot> => {
+  const pending = profileRequests.get(userId);
+  if (pending) return pending;
+  const request = readStyleProfileSnapshot(userId).finally(() => {
+    if (profileRequests.get(userId) === request) profileRequests.delete(userId);
+  });
+  profileRequests.set(userId, request);
+  return request;
+};
+
 export const clearRecsCaches = async (): Promise<void> => {
+  cacheGeneration++;
+  configRequest = null;
+  profileRequests.clear();
   memoryConfig = null;
   const userIds = [...memoryProfiles.keys()];
   memoryProfiles.clear();

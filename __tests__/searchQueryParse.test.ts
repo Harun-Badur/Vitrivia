@@ -17,14 +17,17 @@ describe('parseSearchQuery', () => {
     });
   });
 
-  it('maps üst/alt/dış and keeps ayakkabı as text', () => {
+  it('maps existing and new categories', () => {
     expect(parseSearchQuery('üst').filters.category).toBe('upper_body');
     expect(parseSearchQuery('alt').filters.category).toBe('lower_body');
     expect(parseSearchQuery('dış').filters.category).toBe('upper_body');
     expect(parseSearchQuery('ayakkabı kırmızı').filters).toMatchObject({
       color: 'kirmizi',
-      text: 'ayakkabı',
+      category: 'shoes',
     });
+    expect(parseSearchQuery('çanta').filters.category).toBe('bags');
+    expect(parseSearchQuery('şapka').filters.category).toBe('hats');
+    expect(parseSearchQuery('aksesuar').filters.category).toBe('accessories');
   });
 
   it('parses style tokens into style field', () => {

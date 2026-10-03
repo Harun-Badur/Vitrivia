@@ -3,7 +3,7 @@ import path from 'node:path';
 import { config as loadEnv } from 'dotenv';
 import { parse } from 'csv-parse/sync';
 import { createClient } from '@supabase/supabase-js';
-import type { FeedProvider, FeedProductRow } from '../types/product';
+import { isFeedProvider, isGarmentCategory, type FeedProvider, type FeedProductRow } from '../types/product';
 
 loadEnv();
 
@@ -38,13 +38,12 @@ const PROVIDER_MAPPINGS: Record<FeedProvider, ColumnMapping> = {
   amazon: MARKETPLACE_COLUMN_MAPPING,
   trendyol: MARKETPLACE_COLUMN_MAPPING,
   hepsiburada: MARKETPLACE_COLUMN_MAPPING,
+  boyner: MARKETPLACE_COLUMN_MAPPING,
+  mavi: MARKETPLACE_COLUMN_MAPPING,
+  lcw: MARKETPLACE_COLUMN_MAPPING,
+  defacto: MARKETPLACE_COLUMN_MAPPING,
+  flo: MARKETPLACE_COLUMN_MAPPING,
 };
-
-const isFeedProvider = (value: string): value is FeedProvider =>
-  value === 'amazon' ||
-  value === 'trendyol' ||
-  value === 'hepsiburada' ||
-  value === 'mock';
 
 const looksLikeSource = (value: string): boolean =>
   value.endsWith('.csv') ||
@@ -132,6 +131,9 @@ const mapRow = (
   const imageUrl = cell(raw, mapping.image_url, true);
   const productUrl = cell(raw, mapping.product_url, true);
   const category = cell(raw, mapping.category, true);
+  if (!isGarmentCategory(category)) {
+    throw new Error(`CSV category geçersiz: ${category}`);
+  }
   const affiliateUrl = cell(raw, mapping.affiliate_url, false);
 
   return {

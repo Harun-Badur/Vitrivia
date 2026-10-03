@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -7,34 +13,54 @@ import {
   Share,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { LinearGradient } from 'expo-linear-gradient';
+import Svg, { Circle } from 'react-native-svg';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import * as StoreReview from 'expo-store-review';
 import {
+  Bell,
+  Camera,
   ChevronRight,
-  Gift,
-  Lock,
+  CircleHelp,
+  Database,
+  Heart,
   LogOut,
+  Palette,
+  Pencil,
+  Ruler,
+  ShieldCheck,
+  Shirt,
   Sparkles,
-  Star,
+  Tag,
+  Trash2,
   User,
 } from 'lucide-react-native';
 import InviteCodeModal from '../../components/InviteCodeModal';
 import PressableScale from '../../components/PressableScale';
-import SizeStudioSheet from '../../components/SizeStudioSheet';
+import ProfileSheet from '../../components/ProfileSheet';
+import SizeStudioSheet, {
+  type StyleSheetSection,
+} from '../../components/SizeStudioSheet';
 import TryOnHistorySheet from '../../components/TryOnHistorySheet';
 import { useAuthContext } from '../../hooks/useAuthContext';
 import { buildInviteShareMessage } from '../../lib/inviteShare';
 import { logger } from '../../lib/logger';
 import { checkLowResolutionPersonPhoto } from '../../lib/personPhotoPrepare';
 import { PRIVACY_URL, SUPPORT_EMAIL } from '../../lib/privacy';
-import { colors, radius, spacing } from '../../lib/theme';
+import { colors, radius, shadows, spacing } from '../../lib/theme';
 import { LOW_RES_MODEL_PHOTO_HINT } from '../../lib/vtonPersonImage';
 import { deleteAccount } from '../../services/accountService';
+import {
+  fetchAccountDetails,
+  saveAccountDetails,
+  type AccountDetails,
+} from '../../services/accountDetailsService';
+import { useAppStore } from '../../store/useAppStore';
 import {
   createModelPhotoSignedUrl,
   fetchStudioProfile,
@@ -43,14 +69,15 @@ import {
   upsertStudioProfile,
 } from '../../services/profileService';
 import {
+  STYLE_TAGS,
   type GarmentSize,
   type StyleTag,
   type StudioProfilePatch,
   type UserStudioProfile,
 } from '../../types/profile';
 
-const AVATAR_SIZE = 56;
-const AVATAR_RADIUS = 16;
+const AVATAR_SIZE = 82;
+const AVATAR_RADIUS = AVATAR_SIZE / 2;
 const ICON_SM = 18;
 const ICON_AVATAR = 26;
 const TOAST_DURATION_MS = 1600;
@@ -109,6 +136,22 @@ function MenuRow({
 
 export default function ProfileScreen() {
   const { user, signOut } = useAuthContext();
+  const insets = useSafeAreaInsets();
+  const wardrobeCount = useAppStore((state) => state.wardrobeItems.length);
+  const favoriteCount = useAppStore((state) => state.likedProducts.length);
+  const outfitCount = useAppStore((state) => state.savedOutfits.length);
+  const [account, setAccount] = useState<AccountDetails | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountLoading, setAccountLoading] = useState(false);
+  const [accountSaving, setAccountSaving] = useState(false);
+  const [accountName, setAccountName] = useState('');
+  const [accountEmailInput, setAccountEmailInput] = useState('');
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [accountNotice, setAccountNotice] = useState<string | null>(null);
+  const currentAccount = account?.id === user?.id ? account : null;
+  const displayName =
+    currentAccount?.username || user?.email?.split('@')[0] || 'Kullanıcı';
+  const accountEmail = currentAccount?.email || user?.email || 'E-posta yok';
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -119,14 +162,42 @@ export default function ProfileScreen() {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [sizeOpen, setSizeOpen] = useState(false);
+  const [styleSheetSection, setStyleSheetSection] =
+    useState<StyleSheetSection>('all');
   const [inviteOpen, setInviteOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const userId = user?.id ?? null;
-  const isBusy = isSigningOut || isDeleting || isSaving || uploadProgress !== null;
+  const isBusy =
+    isSigningOut || isDeleting || isSaving || uploadProgress !== null;
   const hasPhoto = photoUri !== null;
   const currentStudio = studio ?? (userId ? emptyStudio(userId) : null);
+  const styleSummary =
+    STYLE_TAGS.filter((tag) => currentStudio?.styleTags.includes(tag.value))
+      .map((tag) => tag.label)
+      .join(', ') || 'Belirlenmedi';
+  const bodySummary =
+    [
+      currentStudio?.topSize,
+      currentStudio?.bottomSize && `Alt: ${currentStudio.bottomSize}`,
+      currentStudio?.heightCm != null && `${currentStudio.heightCm} cm`,
+      currentStudio?.weightKg != null && `${currentStudio.weightKg} kg`,
+    ]
+      .filter(Boolean)
+      .join(' · ') || 'Belirlenmedi';
+  const favoriteBrands =
+    currentStudio?.favoriteBrands?.join(', ') || 'Seçilmedi';
+  const profileFields = [
+    Boolean(currentStudio?.styleTags.length),
+    currentStudio?.heightCm != null,
+    currentStudio?.weightKg != null,
+    Boolean(currentStudio?.topSize),
+    Boolean(currentStudio?.bottomSize),
+  ];
+  const profileCompletion = Math.round(
+    (profileFields.filter(Boolean).length / profileFields.length) * 100,
+  );
 
   const showToast = useCallback((message: string): void => {
     if (toastTimeoutRef.current !== null) {
@@ -179,6 +250,76 @@ export default function ProfileScreen() {
     }, [loadStudio, userId]),
   );
 
+  useFocusEffect(
+    useCallback(() => {
+      if (!userId) return;
+      let active = true;
+      void fetchAccountDetails(userId)
+        .then((details) => {
+          if (active) setAccount(details);
+        })
+        .catch(() => {
+          // Keep the last confirmed account details when offline.
+        });
+      return () => {
+        active = false;
+      };
+    }, [userId]),
+  );
+
+  const handleOpenAccount = async (): Promise<void> => {
+    if (!userId) return;
+    setAccountOpen(true);
+    setAccountLoading(true);
+    setAccountError(null);
+    setAccountNotice(null);
+    try {
+      const details = await fetchAccountDetails(userId);
+      setAccount(details);
+      setAccountName(details.username);
+      setAccountEmailInput(details.pendingEmail ?? details.email);
+      if (details.pendingEmail)
+        setAccountNotice(
+          'E-posta değişikliği onay bekliyor. Gelen doğrulama bağlantılarını tamamla.',
+        );
+    } catch (error) {
+      setAccountError(
+        error instanceof Error ? error.message : 'Hesap bilgileri yüklenemedi.',
+      );
+    } finally {
+      setAccountLoading(false);
+    }
+  };
+
+  const handleSaveAccount = async (): Promise<void> => {
+    if (!userId || accountSaving || accountLoading || !currentAccount) return;
+    setAccountSaving(true);
+    setAccountError(null);
+    setAccountNotice(null);
+    try {
+      const details = await saveAccountDetails(userId, {
+        username: accountName,
+        email: accountEmailInput,
+      });
+      setAccount(details);
+      setAccountName(details.username);
+      setAccountEmailInput(details.pendingEmail ?? details.email);
+      setAccountNotice(
+        details.pendingEmail
+          ? 'Kullanıcı adı kaydedildi. E-posta değişikliği için gelen doğrulama bağlantılarını tamamla.'
+          : 'Hesap bilgileri kaydedildi.',
+      );
+    } catch (error) {
+      setAccountError(
+        error instanceof Error
+          ? error.message
+          : 'Hesap bilgileri kaydedilemedi.',
+      );
+    } finally {
+      setAccountSaving(false);
+    }
+  };
+
   useEffect(() => {
     if (!userId) {
       setStudio(null);
@@ -195,7 +336,7 @@ export default function ProfileScreen() {
     setErrorMessage(null);
     try {
       const next = await upsertStudioProfile(userId, patch);
-      setStudio(next);
+      setStudio((previous) => ({ ...previous, ...next }));
     } catch (error) {
       logger.error('Stüdyo kaydı başarısız', { error });
       setErrorMessage(
@@ -235,7 +376,7 @@ export default function ProfileScreen() {
       const next = await uploadModelPhoto(userId, result.assets[0].uri, {
         onProgress: setUploadProgress,
       });
-      setStudio(next);
+      setStudio((previous) => ({ ...previous, ...next }));
       setPhotoUri(result.assets[0].uri);
       const lowRes = await checkLowResolutionPersonPhoto(result.assets[0].uri);
       setIsModelPhotoLowRes(lowRes);
@@ -259,7 +400,7 @@ export default function ProfileScreen() {
     setErrorMessage(null);
     try {
       const next = await removeModelPhoto(userId);
-      setStudio(next);
+      setStudio((previous) => ({ ...previous, ...next }));
       setPhotoUri(null);
       setIsModelPhotoLowRes(false);
     } catch (error) {
@@ -375,7 +516,7 @@ export default function ProfileScreen() {
       logger.warn('Mağaza değerlendirmesi açılamadı', { error });
     }
 
-    const mailUrl = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Kabin geri bildirim')}`;
+    const mailUrl = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Vitirify geri bildirim')}`;
     void Linking.openURL(mailUrl).catch((error: unknown) => {
       logger.error('Destek e-postası açılamadı', { error });
       Alert.alert(
@@ -395,182 +536,372 @@ export default function ProfileScreen() {
     void persistPatch({ styleTags: nextTags });
   };
 
+  const handleSavePreferences = async (
+    patch: StudioProfilePatch,
+  ): Promise<boolean> => {
+    if (!userId || isBusy) return false;
+    setIsSaving(true);
+    setErrorMessage(null);
+    try {
+      const next = await upsertStudioProfile(userId, patch);
+      setStudio((previous) => ({ ...previous, ...next }));
+      return true;
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : 'Değişiklik kaydedilemedi.',
+      );
+      return false;
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   return (
-    <View style={styles.root}>
+    <View style={[styles.root, { paddingTop: insets.top + spacing.md }]}>
       <Text style={styles.header}>Profil</Text>
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
       >
-        {errorMessage ? (
-          <Text style={styles.error}>{errorMessage}</Text>
-        ) : null}
+        {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
 
-        <View style={styles.heroRow}>
-          <PressableScale
-            onLongPress={handleRemovePhoto}
-            disabled={!hasPhoto || isBusy}
-            style={styles.avatar}
-            accessibilityRole="button"
-            accessibilityLabel="Model fotoğrafı"
-          >
-            {hasPhoto ? (
-              <Image
-                source={{ uri: photoUri }}
-                style={styles.avatarImage}
-                contentFit="cover"
-                cachePolicy="none"
-                recyclingKey={photoUri}
-              />
-            ) : (
-              <View style={styles.avatarPlaceholder}>
-                <User color={colors.textSecondary} size={ICON_AVATAR} />
-              </View>
-            )}
-            {uploadProgress !== null ? (
-              <View style={styles.avatarScrim}>
-                <ActivityIndicator color={colors.inverseText} />
-              </View>
-            ) : null}
-          </PressableScale>
-          <View style={styles.heroCopy}>
-            <Text style={styles.email} numberOfLines={1}>
-              {user?.email ?? 'E-posta yok'}
-            </Text>
-            <View
-              style={[
-                styles.badge,
-                hasPhoto ? styles.badgeActive : styles.badgeIdle,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.badgeText,
-                  hasPhoto ? styles.badgeTextActive : styles.badgeTextIdle,
-                ]}
+        <View style={styles.profileCard}>
+          <View style={styles.heroRow}>
+            <View style={styles.avatarWrap}>
+              <PressableScale
+                onLongPress={handleRemovePhoto}
+                disabled={!hasPhoto || isBusy}
+                style={styles.avatar}
+                accessibilityRole="button"
+                accessibilityLabel="Model fotoğrafı"
               >
-                {hasPhoto ? 'AI Manken: Aktif' : 'AI Manken: Kur'}
-              </Text>
+                {hasPhoto ? (
+                  <Image
+                    source={{ uri: photoUri }}
+                    style={styles.avatarImage}
+                    contentFit="cover"
+                    cachePolicy="none"
+                    recyclingKey={photoUri}
+                  />
+                ) : (
+                  <View style={styles.avatarPlaceholder}>
+                    <User color={colors.textSecondary} size={ICON_AVATAR} />
+                  </View>
+                )}
+                {uploadProgress !== null ? (
+                  <View style={styles.avatarScrim}>
+                    <ActivityIndicator color={colors.inverseText} />
+                  </View>
+                ) : null}
+              </PressableScale>
+              <PressableScale
+                onPress={() => {
+                  void handlePickModelPhoto();
+                }}
+                disabled={isBusy}
+                style={styles.cameraButton}
+                accessibilityRole="button"
+                accessibilityLabel="Profil fotoğrafını değiştir"
+              >
+                <Camera size={18} color={colors.accent} />
+              </PressableScale>
+            </View>
+            <View style={styles.heroCopy}>
+              <View style={styles.identityRow}>
+                <View style={styles.identityCopy}>
+                  <Text style={styles.userName} numberOfLines={1}>
+                    {displayName}
+                  </Text>
+                  <Text style={styles.email} numberOfLines={1}>
+                    {accountEmail}
+                  </Text>
+                </View>
+                <PressableScale
+                  onPress={() => {
+                    void handlePickModelPhoto();
+                  }}
+                  disabled={isBusy}
+                  style={styles.editButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Düzenle"
+                >
+                  <Pencil size={14} color={colors.text} />
+                  <Text style={styles.editButtonText}>Düzenle</Text>
+                </PressableScale>
+              </View>
+              <View style={styles.statsRow}>
+                {[
+                  { label: 'Dolabım', value: wardrobeCount },
+                  { label: 'Favoriler', value: favoriteCount },
+                  { label: 'Kombinlerim', value: outfitCount },
+                ].map((stat, index) => (
+                  <View
+                    key={stat.label}
+                    style={[styles.stat, index > 0 && styles.statDivider]}
+                  >
+                    <Text style={styles.statValue}>{stat.value}</Text>
+                    <Text style={styles.statLabel} numberOfLines={2}>
+                      {stat.label}
+                    </Text>
+                  </View>
+                ))}
+              </View>
             </View>
           </View>
-          <PressableScale
-            onPress={() => {
-              void handlePickModelPhoto();
-            }}
-            disabled={isBusy}
-            style={styles.editButton}
-            accessibilityRole="button"
-            accessibilityLabel="Düzenle"
-          >
-            <Text style={styles.editButtonText}>Düzenle</Text>
-          </PressableScale>
         </View>
         {isModelPhotoLowRes ? (
           <Text style={styles.lowResHint}>{LOW_RES_MODEL_PHOTO_HINT}</Text>
         ) : null}
 
-        <LinearGradient
-          colors={[colors.accentSoft, colors.surface]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.viralCard}
-        >
-          <View style={styles.viralHeader}>
-            <View style={styles.giftWrap}>
-              <Gift color={colors.accentDark} size={22} />
-            </View>
-            <View style={styles.viralCopy}>
-              <Text style={styles.viralTitle}>Arkadaşını Davet Et</Text>
-              <Text style={styles.viralSubtitle}>
-                Arkadaşlarını davet et, ekstra sanal deneme hakkı kazan.
-              </Text>
-            </View>
+        <View style={styles.styleProgressCard}>
+          <Sparkles color={colors.accent} size={32} />
+          <View style={styles.progressCopy}>
+            <Text style={styles.progressTitle}>Stilin oluşuyor.</Text>
+            <Text style={styles.progressDescription}>
+              Profil bilgilerinle stilini tamamlıyoruz.
+            </Text>
           </View>
-          <PressableScale
-            onPress={() => {
-              void handleInvite();
-            }}
-            style={styles.inviteButton}
-            accessibilityRole="button"
-            accessibilityLabel="Davet et"
+          <View
+            style={styles.progressCircle}
+            accessibilityRole="progressbar"
+            accessibilityLabel="Beden ve stil bilgilerinin tamamlanma oranı"
+            accessibilityValue={{ min: 0, max: 100, now: profileCompletion }}
           >
-            <Text style={styles.inviteButtonText}>Davet Et</Text>
-          </PressableScale>
-          <PressableScale
-            onPress={() => setInviteOpen(true)}
-            accessibilityRole="button"
-            accessibilityLabel="Davet kodu gir"
-          >
-            <Text style={styles.inviteLink}>Davet Kodu Gir</Text>
-          </PressableScale>
-        </LinearGradient>
-
-        <View>
-          <Text style={styles.groupLabel}>Aktivite</Text>
-          <View style={styles.menuCard}>
-            <MenuRow
-              label="Denemelerim"
-              icon={<Sparkles color={colors.icon} size={ICON_SM} />}
-              onPress={() => setHistoryOpen(true)}
-              accessibilityLabel="Denemelerim"
-            />
-            <MenuRow
-              label="Beden & Stil Tercihlerim"
-              icon={<User color={colors.icon} size={ICON_SM} />}
-              onPress={() => setSizeOpen(true)}
-              accessibilityLabel="Beden ve stil tercihlerim"
-              isLast
-            />
+            <Svg width={64} height={64} viewBox="0 0 72 72">
+              <Circle
+                cx={36}
+                cy={36}
+                r={30}
+                fill="none"
+                stroke={colors.accentSoft}
+                strokeWidth={5}
+              />
+              <Circle
+                cx={36}
+                cy={36}
+                r={30}
+                fill="none"
+                stroke={colors.accent}
+                strokeWidth={5}
+                strokeLinecap="round"
+                strokeDasharray={`${2 * Math.PI * 30}`}
+                strokeDashoffset={
+                  2 * Math.PI * 30 * (1 - profileCompletion / 100)
+                }
+                rotation={-90}
+                origin="36, 36"
+              />
+            </Svg>
+            <Text style={styles.progressPercent}>{profileCompletion}%</Text>
           </View>
         </View>
 
         <View>
-          <Text style={styles.groupLabel}>Destek & hesap</Text>
-          <View style={styles.menuCard}>
-            <MenuRow
-              label="Geri Bildirim & Değerlendir"
-              icon={<Star color={colors.icon} size={ICON_SM} />}
+          <View style={styles.styleHeading}>
+            <Text style={styles.sectionTitle}>Stil Bilgilerim</Text>
+            <PressableScale
               onPress={() => {
-                void handleFeedback();
+                setStyleSheetSection('all');
+                setSizeOpen(true);
               }}
-              accessibilityLabel="Geri bildirim ve değerlendir"
-            />
-            <MenuRow
-              label="Gizlilik Politikası"
-              icon={<Lock color={colors.icon} size={ICON_SM} />}
-              onPress={handleOpenPrivacy}
-              accessibilityRole="link"
-              accessibilityLabel="Gizlilik politikası"
-            />
-            <MenuRow
-              label="Çıkış Yap"
-              icon={<LogOut color={colors.icon} size={ICON_SM} />}
-              onPress={() => {
-                void handleSignOut();
-              }}
-              accessibilityLabel="Çıkış yap"
               disabled={isBusy}
-              isLast
-              trailing={
-                isSigningOut ? (
-                  <ActivityIndicator color={colors.text} />
-                ) : null
-              }
-            />
+              style={styles.sectionEdit}
+              accessibilityRole="button"
+              accessibilityLabel="Stil bilgilerini düzenle"
+            >
+              <Pencil color={colors.text} size={18} />
+              <Text style={styles.sectionEditText}>Düzenle</Text>
+            </PressableScale>
           </View>
+          <View style={styles.styleGrid}>
+            {[
+              {
+                title: 'Stil Tarzım',
+                value: styleSummary,
+                Icon: Shirt,
+                onPress: () => {
+                  setStyleSheetSection('style');
+                  setSizeOpen(true);
+                },
+              },
+              {
+                title: 'Beden Bilgilerim',
+                value: bodySummary,
+                Icon: Ruler,
+                onPress: () => {
+                  setStyleSheetSection('body');
+                  setSizeOpen(true);
+                },
+              },
+              {
+                title: 'Renk Tercihlerim',
+                value:
+                  currentStudio?.preferredColors?.join(', ') || 'Seçilmedi',
+                Icon: Palette,
+                onPress: () => {
+                  setStyleSheetSection('colors');
+                  setSizeOpen(true);
+                },
+              },
+              {
+                title: 'Favori Markalarım',
+                value: favoriteBrands,
+                Icon: Tag,
+                onPress: () => {
+                  setStyleSheetSection('brands');
+                  setSizeOpen(true);
+                },
+              },
+              {
+                title: 'Fiyat Aralığım',
+                value: currentStudio?.priceRange
+                  ? `₺${currentStudio.priceRange.min.toLocaleString('tr-TR')} – ₺${currentStudio.priceRange.max.toLocaleString('tr-TR')}`
+                  : 'Belirlenmedi',
+                Icon: Database,
+                onPress: () => {
+                  setStyleSheetSection('budget');
+                  setSizeOpen(true);
+                },
+              },
+              {
+                title: 'Stil Profilini Gör',
+                value: 'Senin stil özetin',
+                Icon: Heart,
+                onPress: () => {
+                  setStyleSheetSection('summary');
+                  setSizeOpen(true);
+                },
+              },
+            ].map(({ title, value, Icon, onPress }) => (
+              <PressableScale
+                key={title}
+                style={styles.styleTile}
+                onPress={onPress}
+                disabled={isBusy}
+                accessibilityRole="button"
+                accessibilityLabel={title}
+              >
+                <View style={styles.styleIcon}>
+                  <Icon size={22} color={colors.text} />
+                </View>
+                <View style={styles.tileCopy}>
+                  <Text style={styles.tileTitle} numberOfLines={2}>
+                    {title}
+                  </Text>
+                  <Text style={styles.tileValue} numberOfLines={2}>
+                    {value}
+                  </Text>
+                </View>
+                <ChevronRight size={15} color={colors.tabInactive} />
+              </PressableScale>
+            ))}
+          </View>
+        </View>
+
+        <View style={styles.menuCard}>
+          <MenuRow
+            label="Denemelerim"
+            icon={<Sparkles color={colors.text} size={22} />}
+            onPress={() => setHistoryOpen(true)}
+            accessibilityLabel="Denemelerim"
+          />
+          <MenuRow
+            label="Hesap Bilgilerim"
+            icon={<User color={colors.text} size={22} />}
+            onPress={() => {
+              void handleOpenAccount();
+            }}
+            disabled={isBusy}
+            accessibilityLabel="Hesap Bilgilerim"
+          />
+          <MenuRow
+            label="Bildirim Ayarları"
+            icon={<Bell color={colors.text} size={22} />}
+            onPress={() => {
+              void Linking.openSettings().catch(() =>
+                Alert.alert(
+                  'Ayarlar açılamadı',
+                  'Cihaz ayarlarından bildirim izinlerini düzenleyebilirsin.',
+                ),
+              );
+            }}
+            accessibilityLabel="Bildirim Ayarları"
+          />
+          <MenuRow
+            label="Gizlilik ve Güvenlik"
+            icon={<ShieldCheck color={colors.text} size={22} />}
+            onPress={handleOpenPrivacy}
+            accessibilityRole="link"
+            accessibilityLabel="Gizlilik ve Güvenlik"
+          />
+          <MenuRow
+            label="Yardım ve Destek"
+            icon={<CircleHelp color={colors.text} size={22} />}
+            onPress={() =>
+              Alert.alert('Yardım ve Destek', SUPPORT_EMAIL, [
+                { text: 'Kapat', style: 'cancel' },
+                {
+                  text: 'Geri bildirim ve değerlendir',
+                  onPress: () => {
+                    void handleFeedback();
+                  },
+                },
+                {
+                  text: 'Davet seçenekleri',
+                  onPress: () =>
+                    Alert.alert('Davet seçenekleri', undefined, [
+                      { text: 'Kapat', style: 'cancel' },
+                      {
+                        text: 'Davet Et',
+                        onPress: () => {
+                          void handleInvite();
+                        },
+                      },
+                      {
+                        text: 'Davet Kodu Gir',
+                        onPress: () => setInviteOpen(true),
+                      },
+                    ]),
+                },
+              ])
+            }
+            accessibilityLabel="Yardım ve Destek"
+            isLast
+          />
         </View>
 
         <PressableScale
           onPress={handleDeleteAccount}
           disabled={isBusy}
-          style={styles.deleteLink}
+          style={[styles.accountButton, styles.deleteButton]}
           accessibilityRole="button"
           accessibilityLabel="Hesabımı sil"
         >
           {isDeleting ? (
-            <ActivityIndicator color={colors.tabInactive} />
+            <ActivityIndicator color={colors.accent} />
           ) : (
-            <Text style={styles.deleteLinkText}>Hesabımı Sil</Text>
+            <>
+              <Trash2 size={22} color={colors.accent} />
+              <Text style={styles.deleteButtonText}>Hesabımı Sil</Text>
+            </>
+          )}
+        </PressableScale>
+        <PressableScale
+          onPress={() => {
+            void handleSignOut();
+          }}
+          disabled={isBusy}
+          style={[styles.accountButton, styles.signOutButton]}
+          accessibilityRole="button"
+          accessibilityLabel="Çıkış yap"
+        >
+          {isSigningOut ? (
+            <ActivityIndicator color={colors.text} />
+          ) : (
+            <>
+              <LogOut size={22} color={colors.tabInactive} />
+              <Text style={styles.signOutText}>Çıkış Yap</Text>
+            </>
           )}
         </PressableScale>
       </ScrollView>
@@ -581,6 +912,69 @@ export default function ProfileScreen() {
         </View>
       ) : null}
 
+      <ProfileSheet
+        visible={accountOpen}
+        title="Hesap Bilgilerim"
+        onClose={() => {
+          if (!accountSaving) setAccountOpen(false);
+        }}
+      >
+        <View style={styles.accountForm}>
+          {accountLoading ? (
+            <ActivityIndicator color={colors.accent} />
+          ) : (
+            <>
+              <Text style={styles.accountFieldLabel}>Kullanıcı adı</Text>
+              <TextInput
+                value={accountName}
+                onChangeText={setAccountName}
+                editable={!accountSaving && !!currentAccount}
+                maxLength={80}
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={styles.accountInput}
+                accessibilityLabel="Hesap kullanıcı adı"
+              />
+              <Text style={styles.accountFieldLabel}>E-posta</Text>
+              <TextInput
+                value={accountEmailInput}
+                onChangeText={setAccountEmailInput}
+                editable={!accountSaving && !!currentAccount}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={styles.accountInput}
+                accessibilityLabel="Hesap e-posta adresi"
+              />
+            </>
+          )}
+          {accountError ? (
+            <Text style={styles.error} accessibilityRole="alert">
+              {accountError}
+            </Text>
+          ) : null}
+          {accountNotice ? (
+            <Text style={styles.accountNotice} accessibilityRole="alert">
+              {accountNotice}
+            </Text>
+          ) : null}
+          <PressableScale
+            onPress={() => {
+              void handleSaveAccount();
+            }}
+            disabled={accountSaving || accountLoading || !currentAccount}
+            style={styles.accountSaveButton}
+            accessibilityRole="button"
+            accessibilityLabel="Hesap bilgilerini kaydet"
+          >
+            {accountSaving ? (
+              <ActivityIndicator color={colors.inverseText} />
+            ) : (
+              <Text style={styles.accountSaveText}>Kaydet</Text>
+            )}
+          </PressableScale>
+        </View>
+      </ProfileSheet>
       <TryOnHistorySheet
         visible={historyOpen}
         userId={userId}
@@ -589,6 +983,7 @@ export default function ProfileScreen() {
       {currentStudio ? (
         <SizeStudioSheet
           visible={sizeOpen}
+          section={styleSheetSection}
           profile={currentStudio}
           disabled={isBusy}
           onClose={() => setSizeOpen(false)}
@@ -605,6 +1000,7 @@ export default function ProfileScreen() {
             void persistPatch({ bottomSize: value });
           }}
           onStyleToggle={handleStyleToggle}
+          onSavePreferences={handleSavePreferences}
         />
       ) : null}
       <InviteCodeModal
@@ -617,20 +1013,45 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
+  accountForm: { gap: spacing.sm },
+  accountFieldLabel: { color: colors.text, fontSize: 13, fontWeight: '600' },
+  accountInput: {
+    minHeight: 48,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.button,
+    paddingHorizontal: spacing.lg,
+    color: colors.text,
+    fontSize: 16,
+    backgroundColor: colors.input,
+  },
+  accountNotice: { color: colors.textSecondary, fontSize: 13, lineHeight: 18 },
+  accountSaveButton: {
+    minHeight: 48,
+    borderRadius: radius.button,
+    backgroundColor: colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: spacing.sm,
+  },
+  accountSaveText: {
+    color: colors.inverseText,
+    fontSize: 16,
+    fontWeight: '700',
+  },
   root: {
     flex: 1,
-    backgroundColor: colors.bgSoft,
-    paddingTop: 56,
-    paddingHorizontal: spacing.xl,
+    backgroundColor: colors.bg,
+    paddingHorizontal: spacing.lg,
   },
   header: {
-    fontSize: 28,
+    fontSize: 32,
     fontWeight: '800',
     color: colors.text,
-    marginBottom: spacing.xl,
+    marginBottom: spacing.md,
   },
   scroll: {
-    gap: spacing.lg,
+    gap: spacing.md,
     paddingBottom: spacing.xxl,
   },
   error: {
@@ -643,11 +1064,20 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     lineHeight: 18,
   },
+  profileCard: {
+    backgroundColor: colors.input,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.hairline,
+    padding: spacing.md,
+    ...shadows.segment,
+  },
   heroRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: spacing.md,
   },
+  avatarWrap: { width: AVATAR_SIZE, height: AVATAR_SIZE, marginTop: 4 },
   avatar: {
     width: AVATAR_SIZE,
     height: AVATAR_SIZE,
@@ -665,48 +1095,66 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   avatarScrim: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: colors.inverseSurface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cameraButton: {
+    position: 'absolute',
+    right: -3,
+    bottom: -3,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.input,
     alignItems: 'center',
     justifyContent: 'center',
   },
   heroCopy: {
     flex: 1,
-    gap: spacing.xs,
+    minWidth: 0,
+    gap: spacing.lg,
+  },
+  identityRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  identityCopy: { flex: 1, minWidth: 0, gap: spacing.xs },
+  userName: {
+    color: colors.text,
+    fontSize: 17,
+    lineHeight: 22,
+    fontWeight: '800',
   },
   email: {
-    color: colors.text,
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  badge: {
-    alignSelf: 'flex-start',
-    borderRadius: radius.chip,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-  },
-  badgeActive: {
-    backgroundColor: colors.accentSoft,
-  },
-  badgeIdle: {
-    backgroundColor: colors.hairline,
-  },
-  badgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  badgeTextActive: {
-    color: colors.accentDark,
-  },
-  badgeTextIdle: {
     color: colors.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  statsRow: { flexDirection: 'row' },
+  stat: { flex: 1, minWidth: 0, alignItems: 'center', gap: 3 },
+  statDivider: { borderLeftWidth: 1, borderLeftColor: colors.hairline },
+  statValue: { color: colors.text, fontSize: 20, fontWeight: '800' },
+  statLabel: {
+    color: colors.textSecondary,
+    fontSize: 10,
+    lineHeight: 14,
+    textAlign: 'center',
   },
   editButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    flexShrink: 0,
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radius.button,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
     backgroundColor: colors.input,
   },
   editButtonText: {
@@ -714,66 +1162,82 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
-  viralCard: {
-    borderRadius: radius.card,
-    padding: spacing.lg,
-    gap: spacing.md,
-    overflow: 'hidden',
-  },
-  viralHeader: {
+  styleProgressCard: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: spacing.md,
-    alignItems: 'flex-start',
+    padding: spacing.md,
+    borderRadius: radius.card,
+    backgroundColor: colors.accentSoft,
   },
-  giftWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: radius.button,
-    backgroundColor: colors.input,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  viralCopy: {
-    flex: 1,
-    gap: spacing.xs,
-  },
-  viralTitle: {
-    color: colors.text,
-    fontSize: 17,
-    fontWeight: '800',
-  },
-  viralSubtitle: {
-    color: colors.textSecondary,
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: '500',
-  },
-  inviteButton: {
-    backgroundColor: colors.accent,
-    borderRadius: radius.button,
-    minHeight: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  inviteButtonText: {
-    color: colors.inverseText,
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  inviteLink: {
-    color: colors.accentDark,
-    fontSize: 14,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  groupLabel: {
+  progressCopy: { flex: 1, minWidth: 0, gap: spacing.xs },
+  progressTitle: { color: colors.text, fontSize: 17, fontWeight: '800' },
+  progressDescription: {
     color: colors.textSecondary,
     fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
+    lineHeight: 17,
+  },
+  progressCircle: {
+    width: 64,
+    height: 64,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  progressPercent: {
+    position: 'absolute',
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  styleHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: spacing.sm,
   },
+  sectionTitle: { color: colors.text, fontSize: 20, fontWeight: '800' },
+  sectionEdit: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.xs,
+  },
+  sectionEditText: { color: colors.text, fontSize: 13, fontWeight: '500' },
+  styleGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  styleTile: {
+    width: '48%',
+    flexGrow: 1,
+    minHeight: 80,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.md,
+    borderRadius: radius.card,
+    backgroundColor: colors.input,
+    borderWidth: 1,
+    borderColor: colors.hairline,
+    ...shadows.segment,
+  },
+  styleIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.input,
+    borderWidth: 1,
+    borderColor: colors.hairline,
+    ...shadows.segment,
+  },
+  tileCopy: { flex: 1, minWidth: 0, gap: spacing.xs },
+  tileTitle: {
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+  },
+  tileValue: { color: colors.textSecondary, fontSize: 11, lineHeight: 15 },
   menuCard: {
     backgroundColor: colors.input,
     borderRadius: radius.card,
@@ -810,16 +1274,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
   },
-  deleteLink: {
-    alignSelf: 'center',
-    paddingVertical: spacing.lg,
-    marginBottom: spacing.xl,
+  accountButton: {
+    minHeight: 48,
+    borderRadius: radius.button,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
   },
-  deleteLinkText: {
-    color: colors.tabInactive,
-    fontSize: 13,
-    fontWeight: '500',
-  },
+  deleteButton: { backgroundColor: colors.accentSoft },
+  deleteButtonText: { color: colors.accent, fontSize: 15, fontWeight: '600' },
+  signOutButton: { backgroundColor: colors.hairline, marginTop: -4 },
+  signOutText: { color: colors.text, fontSize: 15, fontWeight: '500' },
   toast: {
     position: 'absolute',
     left: spacing.xl,

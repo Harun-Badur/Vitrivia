@@ -1,29 +1,39 @@
 /**
- * Expand products catalog from scripts/data/seed_expansion_links.tsv.
+ * Expand products catalog from a TSV of product links.
  *
  *   npm run seed:expansion
+ *   npm run seed:expansion -- scripts/data/new_product_links.tsv
  *
- * Upserts only (no delete-all). Skips rows that fail HTTP/title/image gates.
+ * Inserts new products only; never updates existing catalog rows.
  */
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config as loadEnv } from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import * as cheerio from 'cheerio';
+import { extractProductImagesFromHtml } from './lib/extractProductImage';
 import {
-  extractProductImages,
-  type ProductImageSource,
-} from './lib/extractProductImage';
-import type {
-  FeedProvider,
-  GarmentCategory,
-  ProductGender,
-} from '../types/product';
+  extractRetailMetadata,
+  inferCatalogCategory,
+  isRetailProvider,
+} from './lib/retailProviders';
+import type { FeedProvider, ProductGender } from '../types/product';
 import { inferProductAttributes } from '../lib/productAttributes';
+import {
+  inferExpansionOutfitRole,
+  canonicalizeCatalogUrl,
+} from './lib/seedExpansionRules';
+import {
+  ingestCatalogLink,
+  type CatalogMetadata,
+  type CatalogProduct,
+  persistIngestionResult,
+  type ImportResult,
+} from './lib/catalogIngestion';
 
 loadEnv();
 
-const TSV_PATH = path.resolve(
+const DEFAULT_TSV_PATH = path.resolve(
   process.cwd(),
   'scripts/data/seed_expansion_links.tsv',
 );
@@ -31,27 +41,10 @@ const TSV_PATH = path.resolve(
 const MIN_DELAY_MS = 300;
 const MAX_DELAY_MS = 800;
 
-const IMAGE_FALLBACK: Record<GarmentCategory, string> = {
-  upper_body:
-    'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=800',
-  lower_body:
-    'https://images.unsplash.com/photo-1542272604-787c3835535d?w=800',
-  dresses:
-    'https://images.unsplash.com/photo-1595777457583-95e059d581b8?w=800',
-};
-
-const CATEGORY_FROM_TSV: Record<string, GarmentCategory> = {
-  ELBİSE: 'dresses',
-  ELBISE: 'dresses',
-  'ÜST GİYİM': 'upper_body',
-  'UST GIYIM': 'upper_body',
-  'ALT GİYİM': 'lower_body',
-  'ALT GIYIM': 'lower_body',
-};
-
 const GENDER_FROM_TSV: Record<string, ProductGender> = {
   KADIN: 'women',
   ERKEK: 'men',
+  UNISEX: 'unisex',
 };
 
 const CHROME_USER_AGENT =
@@ -67,33 +60,8 @@ interface LinkRow {
   url: string;
 }
 
-interface ScrapedMeta {
-  httpStatus: number;
-  title: string;
-  brand: string | null;
-  price: number | null;
-  softBlocked: boolean;
-}
-
-interface BuiltProduct {
-  id: string;
-  provider: FeedProvider;
-  external_id: string;
-  title: string;
-  brand: string;
-  price: number;
-  currency: string;
-  image_url: string;
-  images: string[];
-  product_url: string;
-  category: GarmentCategory;
-  affiliate_url: null;
-  garment_description: string;
-  gender: ProductGender;
-  imageSource: ProductImageSource;
-}
-
 interface SkipRecord {
+  provider: FeedProvider | null;
   url: string;
   reason: string;
 }
@@ -109,9 +77,7 @@ const jitterDelay = async (): Promise<void> => {
   await sleep(ms);
 };
 
-const requireEnv = (
-  name: 'EXPO_PUBLIC_SUPABASE_URL' | 'SUPABASE_SERVICE_ROLE_KEY',
-): string => {
+const requireEnv = (name: 'EXPO_PUBLIC_SUPABASE_URL' | 'SUPABASE_SERVICE_ROLE_KEY' | 'EXPO_PUBLIC_SUPABASE_ANON_KEY'): string => {
   const value = process.env[name]?.trim();
   if (!value) {
     throw new Error(`${name} eksik.`);
@@ -119,82 +85,9 @@ const requireEnv = (
   return value;
 };
 
-const toCanonicalUrl = (rawUrl: string): string => {
-  const parsed = new URL(rawUrl);
-  parsed.search = '';
-  parsed.hash = '';
-  const pathname = parsed.pathname.replace(/\/+$/, '');
-  return `${parsed.origin}${pathname}`;
-};
-
-const detectProvider = (canonicalUrl: string): FeedProvider | null => {
-  const host = new URL(canonicalUrl).hostname;
-  if (host.includes('trendyol.com')) {
-    return 'trendyol';
-  }
-  if (host.includes('hepsiburada.com')) {
-    return 'hepsiburada';
-  }
-  return null;
-};
-
-const extractExternalId = (
-  canonicalUrl: string,
-  provider: FeedProvider,
-): string | null => {
-  if (provider === 'trendyol') {
-    const match = canonicalUrl.match(/-p-(\d+)/i);
-    return match?.[1] ?? null;
-  }
-  if (provider === 'hepsiburada') {
-    const match = canonicalUrl.match(/-p(?:m)?-([A-Za-z0-9]+)/i);
-    return match?.[1] ?? null;
-  }
-  return null;
-};
-
-const mapCategory = (raw: string): GarmentCategory | null => {
-  const key = raw.trim().toLocaleUpperCase('tr-TR');
-  return CATEGORY_FROM_TSV[key] ?? CATEGORY_FROM_TSV[raw.trim()] ?? null;
-};
-
 const mapGender = (raw: string): ProductGender | null => {
   const key = raw.trim().toLocaleUpperCase('tr-TR');
   return GENDER_FROM_TSV[key] ?? null;
-};
-
-const titleFromSlug = (canonicalUrl: string, brandHint: string): string => {
-  try {
-    const parts = new URL(canonicalUrl).pathname.split('/').filter(Boolean);
-    const last = parts[parts.length - 1] ?? '';
-    const withoutId = last.replace(/-p(?:m)?-[A-Za-z0-9]+$/i, '');
-    const words = withoutId
-      .split('-')
-      .filter(Boolean)
-      .map((w) => w.charAt(0).toLocaleUpperCase('tr-TR') + w.slice(1));
-    const slugTitle = words.join(' ').trim();
-    if (slugTitle.length >= 8) {
-      return brandHint && !slugTitle.toLowerCase().includes(brandHint.toLowerCase())
-        ? `${brandHint} ${slugTitle}`
-        : slugTitle;
-    }
-  } catch {
-    /* ignore */
-  }
-  return brandHint;
-};
-
-const isGenericTitle = (title: string): boolean => {
-  const t = title.trim().toLowerCase();
-  if (t.length < 8) {
-    return true;
-  }
-  return (
-    t.includes("türkiye'nin trend yolu") ||
-    t.includes('online alışveriş sitesi') ||
-    t === 'trendyol' ||
-    t === 'hepsiburada'
-  );
 };
 
 const parsePriceNumber = (raw: string): number | null => {
@@ -315,13 +208,35 @@ const headersForUrl = (productUrl: string): Record<string, string> => {
   return headers;
 };
 
-const scrapeMeta = async (productUrl: string): Promise<ScrapedMeta> => {
+const scrapeMeta = async (
+  productUrl: string,
+  provider: FeedProvider,
+): Promise<CatalogMetadata> => {
   try {
     const response = await fetch(productUrl, {
       headers: headersForUrl(productUrl),
       redirect: 'follow',
+      signal: AbortSignal.timeout(15_000),
     });
+    if (!response.ok) {
+      return {
+        httpStatus: response.status, title: '', brand: null, price: null,
+        softBlocked: false, imageUrls: [], imageSource: 'none',
+      };
+    }
     const html = await response.text();
+    if (isRetailProvider(provider)) {
+      const retail = extractRetailMetadata(html, productUrl);
+      return {
+        httpStatus: response.status,
+        title: retail.title,
+        brand: retail.brand,
+        price: retail.price,
+        softBlocked: false,
+        imageUrls: retail.images,
+        imageSource: retail.imageSource,
+      };
+    }
     const $ = cheerio.load(html);
     const hasProductOgImage =
       /property=["']og:image["'][^>]+content=["']https?:\/\/(?:cdn\.dsmcdn\.com|productimages\.hepsiburada\.net)/i.test(
@@ -366,38 +281,62 @@ const scrapeMeta = async (productUrl: string): Promise<ScrapedMeta> => {
       }
     }
 
+    const extracted = extractProductImagesFromHtml(html, provider, '', response.status);
     return {
       httpStatus: response.status,
       title,
       brand: brandMeta && brandMeta.length > 0 ? brandMeta : null,
       price: price !== null && Number.isFinite(price) && price > 0 ? price : null,
       softBlocked,
+      imageUrls: extracted.imageUrls,
+      imageSource: extracted.source,
     };
   } catch {
-    return {
-      httpStatus: 0,
-      title: '',
-      brand: null,
-      price: null,
-      softBlocked: true,
-    };
+    throw new Error('fetch_or_parse_failed');
   }
 };
 
-const parseTsv = async (): Promise<LinkRow[]> => {
-  const raw = await readFile(TSV_PATH, 'utf8');
+const parseTsv = async (
+  inputPath: string,
+): Promise<{ rows: LinkRow[]; invalid: SkipRecord[] }> => {
+  const raw = await readFile(inputPath, 'utf8');
   const rows: LinkRow[] = [];
-  for (const line of raw.split(/\r?\n/)) {
+  const invalid: SkipRecord[] = [];
+  for (const [index, line] of raw.split(/\r?\n/).entries()) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) {
       continue;
     }
     const parts = trimmed.split('\t');
+    if (parts.length === 1) {
+      try {
+        const url = parts[0];
+        const parsed = new URL(url);
+        const category = inferCatalogCategory(url);
+        rows.push({
+          genderRaw: /(?:^|[-/])kadin(?:[-/]|$)/i.test(parsed.pathname)
+            ? 'KADIN'
+            : /(?:^|[-/])erkek(?:[-/]|$)/i.test(parsed.pathname)
+              ? 'ERKEK'
+              : /(?:^|[-/])unisex(?:[-/]|$)/i.test(parsed.pathname)
+                ? 'UNISEX'
+                : '',
+          categoryRaw: category ?? '',
+          brandHint: '',
+          url,
+        });
+      } catch {
+        invalid.push({ provider: null, url: parts[0] || 'line:' + (index + 1), reason: 'invalid_url' });
+      }
+      continue;
+    }
     if (parts.length < 4) {
+      invalid.push({ provider: null, url: `line:${index + 1}`, reason: 'invalid_input_row' });
       continue;
     }
     const [genderRaw, categoryRaw, brandHint, url] = parts;
     if (!genderRaw || !categoryRaw || !url) {
+      invalid.push({ provider: null, url: url || `line:${index + 1}`, reason: 'invalid_input_row' });
       continue;
     }
     rows.push({
@@ -407,241 +346,156 @@ const parseTsv = async (): Promise<LinkRow[]> => {
       url: url.trim(),
     });
   }
-  return rows;
+  return { rows, invalid };
 };
 
 const seedExpansion = async (): Promise<void> => {
-  const supabaseUrl = requireEnv('EXPO_PUBLIC_SUPABASE_URL');
-  const serviceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
-  const linkRows = await parseTsv();
+  const args = process.argv.slice(2);
+  const dryRun = args.includes('--dry-run');
+  const inputArg = args.find((arg) => !arg.startsWith('--'));
+  const inputPath = inputArg
+    ? path.resolve(process.cwd(), inputArg)
+    : DEFAULT_TSV_PATH;
+  const { rows: linkRows, invalid } = await parseTsv(inputPath);
   if (linkRows.length === 0) {
-    throw new Error(`TSV boş: ${TSV_PATH}`);
+    throw new Error(`TSV içinde geçerli satır yok: ${inputPath}`);
   }
 
-  const built: BuiltProduct[] = [];
-  const skipped: SkipRecord[] = [];
-  const seenIds = new Set<string>();
-
-  for (const [index, row] of linkRows.entries()) {
-    const label = `[${index + 1}/${linkRows.length}]`;
-    let canonicalUrl: string;
-    try {
-      canonicalUrl = toCanonicalUrl(row.url);
-    } catch {
-      skipped.push({ url: row.url, reason: 'invalid_url' });
-      console.log(`${label} SKIP invalid_url`);
-      continue;
-    }
-
-    const provider = detectProvider(canonicalUrl);
-    if (!provider) {
-      skipped.push({ url: canonicalUrl, reason: 'unknown_provider' });
-      console.log(`${label} SKIP unknown_provider`);
-      continue;
-    }
-
-    const category = mapCategory(row.categoryRaw);
-    if (!category) {
-      skipped.push({
-        url: canonicalUrl,
-        reason: `bad_category:${row.categoryRaw}`,
-      });
-      console.log(`${label} SKIP bad_category`);
-      continue;
-    }
-
-    const gender = mapGender(row.genderRaw);
-    if (!gender) {
-      skipped.push({ url: canonicalUrl, reason: `bad_gender:${row.genderRaw}` });
-      console.log(`${label} SKIP bad_gender`);
-      continue;
-    }
-
-    const externalId = extractExternalId(canonicalUrl, provider);
-    if (!externalId) {
-      skipped.push({ url: canonicalUrl, reason: 'external_id_parse_failed' });
-      console.log(`${label} SKIP external_id_parse_failed`);
-      continue;
-    }
-
-    const id = `${provider}-${externalId}`;
-    if (seenIds.has(id)) {
-      skipped.push({ url: canonicalUrl, reason: 'duplicate_in_tsv' });
-      console.log(`${label} SKIP duplicate_in_tsv ${id}`);
-      continue;
-    }
-    seenIds.add(id);
-
-    const meta = await scrapeMeta(canonicalUrl);
-    if (meta.httpStatus !== 200) {
-      skipped.push({
-        url: canonicalUrl,
-        reason: `http_${meta.httpStatus || 'error'}`,
-      });
-      console.log(`${label} SKIP http_${meta.httpStatus}`);
-      await jitterDelay();
-      continue;
-    }
-    if (meta.softBlocked) {
-      skipped.push({ url: canonicalUrl, reason: 'soft_blocked_shell' });
-      console.log(`${label} SKIP soft_blocked_shell`);
-      await jitterDelay();
-      continue;
-    }
-
-    let title = meta.title;
-    if (isGenericTitle(title)) {
-      title = titleFromSlug(canonicalUrl, row.brandHint);
-    }
-    if (isGenericTitle(title)) {
-      skipped.push({ url: canonicalUrl, reason: 'no_usable_title' });
-      console.log(`${label} SKIP no_usable_title`);
-      await jitterDelay();
-      continue;
-    }
-
-    const extracted = await extractProductImages(
-      canonicalUrl,
-      provider,
-      IMAGE_FALLBACK[category],
-    );
-    const images =
-      extracted.imageUrls.length > 0
-        ? extracted.imageUrls
-        : extracted.source !== 'fallback'
-          ? [extracted.imageUrl]
-          : [];
-
-    if (images.length === 0 || extracted.source === 'fallback') {
-      skipped.push({
-        url: canonicalUrl,
-        reason: `no_usable_image:http_${extracted.httpStatus}`,
-      });
-      console.log(`${label} SKIP no_usable_image`);
-      await jitterDelay();
-      continue;
-    }
-
-    const brand =
-      meta.brand?.trim() ||
-      row.brandHint.trim() ||
-      (provider === 'trendyol' ? 'Trendyol' : 'Hepsiburada');
-    const price = meta.price ?? 499;
-
-    built.push({
-      id,
-      provider,
-      external_id: externalId,
-      title,
-      brand,
-      price,
-      currency: 'TRY',
-      image_url: images[0] ?? extracted.imageUrl,
-      images,
-      product_url: canonicalUrl,
-      category,
-      affiliate_url: null,
-      garment_description: `${brand} ${title}`,
-      gender,
-      imageSource: extracted.source,
-    });
-
-    console.log(
-      `${label} OK ${id} | ${extracted.source} | imgs=${images.length} | ₺${price}`,
-    );
-    await jitterDelay();
-  }
-
-  const supabase = createClient(supabaseUrl, serviceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-
-  const productPayload = built.map(
-    ({ imageSource: _imageSource, gender: _gender, ...row }) => row,
+  const supabase = createClient(
+    requireEnv('EXPO_PUBLIC_SUPABASE_URL'),
+    requireEnv(dryRun ? 'EXPO_PUBLIC_SUPABASE_ANON_KEY' : 'SUPABASE_SERVICE_ROLE_KEY'),
+    { auth: { persistSession: false, autoRefreshToken: false } },
   );
-
-  let upsertError =
-    productPayload.length === 0
-      ? null
-      : (
-          await supabase.from('products').upsert(productPayload, {
-            onConflict: 'provider,external_id',
-          })
-        ).error;
-
-  if (upsertError?.message.toLowerCase().includes('garment_description')) {
-    const withoutDescription = productPayload.map(
-      ({ garment_description: _g, ...row }) => row,
-    );
-    upsertError = (
-      await supabase.from('products').upsert(withoutDescription, {
-        onConflict: 'provider,external_id',
-      })
-    ).error;
+  const { error: roleColumnError } = await supabase
+    .from('product_attributes')
+    .select('outfit_role')
+    .limit(0);
+  if (roleColumnError) {
+    throw new Error(`outfit_role migration'ı gerekli: ${roleColumnError.message}`);
   }
 
-  if (upsertError?.message.toLowerCase().includes('images')) {
-    const withoutImages = productPayload.map(({ images: _i, ...row }) => row);
-    upsertError = (
-      await supabase.from('products').upsert(withoutImages, {
-        onConflict: 'provider,external_id',
-      })
-    ).error;
+  const existing = { ids: new Set<string>(), urls: new Set<string>() };
+  const pageSize = 500;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from('products')
+      .select('id, provider, external_id, product_url')
+      .order('id', { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) throw new Error(`Mevcut katalog okunamadı: ${error.message}`);
+    for (const row of data ?? []) {
+      if (typeof row.id === 'string') existing.ids.add(row.id);
+      if (typeof row.provider === 'string' && typeof row.external_id === 'string') {
+        existing.ids.add(`${row.provider}-${row.external_id}`);
+      }
+      if (typeof row.product_url === 'string') {
+        try {
+          existing.urls.add(canonicalizeCatalogUrl(row.product_url));
+        } catch {
+          // Existing malformed URLs are left untouched.
+        }
+      }
+    }
+    if ((data ?? []).length < pageSize) break;
   }
 
-  if (upsertError) {
-    throw new Error(`products upsert failed: ${upsertError.message}`);
-  }
-
-  // Gender lives on product_attributes (products.gender column not present).
-  if (built.length > 0) {
-    const attrRows = built.map((row) => {
-      const inferred = inferProductAttributes({
-        title: row.title,
-        brand: row.brand,
-        price: row.price,
-        category: row.category,
-      });
-      return {
-        product_id: row.id,
-        gender: row.gender,
-        colors: inferred.colors,
-        fit: inferred.fit,
-        subcategory: inferred.subcategory,
-        brand_slug: inferred.brand_slug,
-        price_band: inferred.price_band,
+  const results: ImportResult[] = invalid.map((row) => ({
+    status: 'skipped' as const,
+    ...row,
+  }));
+  const seen = { ids: new Set<string>(), urls: new Set<string>() };
+  for (const [index, row] of linkRows.entries()) {
+    const gender = row.genderRaw ? mapGender(row.genderRaw) : null;
+    let result: ImportResult;
+    if (row.genderRaw && !gender) {
+      result = {
+        status: 'skipped', provider: null, url: row.url,
+        reason: `bad_gender:${row.genderRaw}`,
       };
-    });
-    const { error: attrError } = await supabase
-      .from('product_attributes')
-      .upsert(attrRows, { onConflict: 'product_id' });
-    if (attrError) {
-      console.warn(
-        `product_attributes upsert warning: ${attrError.message}`,
-      );
+    } else {
+      result = await ingestCatalogLink({
+        url: row.url, categoryRaw: row.categoryRaw,
+        gender, brandHint: row.brandHint,
+      }, existing, seen, scrapeMeta);
+    }
+
+    result = await persistIngestionResult(result, dryRun, (product) => insertNewProduct(supabase, product));
+    results.push(result);
+    console.log(`[${index + 1}/${linkRows.length}] ${result.status.toUpperCase()} ${result.provider ?? 'unknown'} ${result.url}${'reason' in result ? ` ${result.reason}` : ''}`);
+    if (result.status !== 'duplicate' && result.status !== 'skipped') {
+      await jitterDelay();
     }
   }
 
-  const byCategory = built.reduce<Record<string, number>>((acc, row) => {
-    acc[row.category] = (acc[row.category] ?? 0) + 1;
-    return acc;
-  }, {});
-  const multi = built.filter((row) => row.images.length > 1).length;
-  const imageUrlOk = built.filter(
-    (row) => row.image_url === row.images[0],
-  ).length;
-
-  console.log('--- seed:expansion summary ---');
-  console.log(`tsv_rows=${linkRows.length}`);
-  console.log(`upserted=${built.length}`);
-  console.log(`skipped=${skipped.length}`);
-  console.log(`categories=${JSON.stringify(byCategory)}`);
-  console.log(`multi_images=${multi}/${built.length}`);
-  console.log(`image_url_eq_images0=${imageUrlOk}/${built.length}`);
-  console.log(`ids=${built.map((row) => row.id).join(',')}`);
-  for (const skip of skipped) {
-    console.log(`SKIP\t${skip.reason}\t${skip.url}`);
+  const counts = {
+    processed: results.length,
+    inserted: results.filter((item) => item.status === 'inserted').length,
+    duplicate: results.filter((item) => item.status === 'duplicate').length,
+    skipped: results.filter((item) => item.status === 'skipped').length,
+    failed: results.filter((item) => item.status === 'failed').length,
+    ready: results.filter((item) => item.status === 'ready').length,
+  };
+  const providers: Record<string, number> = {};
+  for (const item of results) {
+    const provider = item.provider ?? 'unknown';
+    providers[provider] = (providers[provider] ?? 0) + 1;
   }
+  console.log('--- seed:expansion summary ---');
+  console.log(`mode=${dryRun ? 'dry-run' : 'import'}`);
+  console.log(`counts=${JSON.stringify(counts)}`);
+  console.log(`providers=${JSON.stringify(providers)}`);
+  for (const item of results) {
+    if (item.status === 'skipped' || item.status === 'failed') {
+      console.log(`${item.status.toUpperCase()}\t${item.provider ?? 'unknown'}\t${item.url}\t${item.reason}`);
+    }
+  }
+};
+
+const insertNewProduct = async (
+  supabase: ReturnType<typeof createClient>,
+  row: CatalogProduct,
+): Promise<ImportResult> => {
+  const { gender, imageSource: _imageSource, ...product } = row;
+  let payload: Partial<typeof product> = product;
+  let { error: productError } = await supabase.from('products').insert(payload);
+  if (productError?.message.toLowerCase().includes('garment_description')) {
+    const { garment_description: _description, ...rest } = payload;
+    payload = rest;
+    ({ error: productError } = await supabase.from('products').insert(payload));
+  }
+  if (productError?.message.toLowerCase().includes('images')) {
+    const { images: _images, ...rest } = payload;
+    payload = rest;
+    ({ error: productError } = await supabase.from('products').insert(payload));
+  }
+  if (productError) {
+    return productError.code === '23505'
+      ? { status: 'duplicate', provider: row.provider, url: row.product_url, reason: 'conflict_at_insert' }
+      : { status: 'failed', provider: row.provider, url: row.product_url, reason: `products_insert:${productError.message}` };
+  }
+  try {
+    const inferred = inferProductAttributes({
+      title: row.title, brand: row.brand, price: row.price, category: row.category,
+    });
+    const { error: attrError } = await supabase.from('product_attributes').insert({
+      product_id: row.id,
+      gender,
+      colors: inferred.colors,
+      fit: inferred.fit,
+      subcategory: inferred.subcategory,
+      brand_slug: inferred.brand_slug,
+      price_band: inferred.price_band,
+      outfit_role: inferExpansionOutfitRole(row.category, row.title, inferred.subcategory),
+    });
+    if (attrError) throw new Error(attrError.message);
+  } catch (error) {
+    const { error: rollbackError } = await supabase.from('products').delete().eq('id', row.id);
+    return {
+      status: 'failed', provider: row.provider, url: row.product_url,
+      reason: `attributes_insert:${error instanceof Error ? error.message : 'unknown'};rollback:${rollbackError ? rollbackError.message : 'ok'}`,
+    };
+  }
+  return { status: 'inserted', provider: row.provider, url: row.product_url };
 };
 
 seedExpansion().catch((error: unknown) => {

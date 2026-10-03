@@ -181,6 +181,18 @@ export const inferSubcategory = (title: string, category: string): string => {
   if (category === 'lower_body') {
     return 'pantolon';
   }
+  if (category === 'shoes') {
+    return 'ayakkabi';
+  }
+  if (category === 'bags') {
+    return 'canta';
+  }
+  if (category === 'hats') {
+    return 'sapka';
+  }
+  if (category === 'accessories') {
+    return 'aksesuar';
+  }
   return 'tisort';
 };
 

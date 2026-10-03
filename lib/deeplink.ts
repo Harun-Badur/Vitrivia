@@ -74,5 +74,7 @@ export const buildAffiliateUrl = (
       return appendQueryParam(productUrl, 'wt_alid', resolvedTag);
     case 'mock':
       return appendQueryParam(productUrl, 'aff_id', resolvedTag);
+    default:
+      return productUrl;
   }
 };

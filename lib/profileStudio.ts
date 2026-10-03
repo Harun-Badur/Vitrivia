@@ -3,10 +3,12 @@ import {
   HEIGHT_CM_MAX,
   HEIGHT_CM_MIN,
   STYLE_TAGS,
+  STUDIO_COLORS,
   WEIGHT_KG_MAX,
   WEIGHT_KG_MIN,
   type GarmentSize,
   type StyleTag,
+  type StudioProfilePatch,
 } from '../types/profile';
 
 const STYLE_TAG_VALUES: readonly StyleTag[] = STYLE_TAGS.map(
@@ -33,3 +35,45 @@ export const parseStyleTags = (value: unknown): StyleTag[] => {
   }
   return value.filter(isStyleTag);
 };
+
+export function parseStudioPreferences(
+  value: unknown,
+): Pick<
+  StudioProfilePatch,
+  'favoriteBrands' | 'preferredColors' | 'priceRange'
+> {
+  const data =
+    value && typeof value === 'object'
+      ? (value as Record<string, unknown>)
+      : {};
+  const strings = (input: unknown): string[] =>
+    Array.isArray(input)
+      ? [
+          ...new Set(
+            input
+              .filter(
+                (item): item is string =>
+                  typeof item === 'string' && !!item.trim(),
+              )
+              .map((item) => item.trim()),
+          ),
+        ]
+      : [];
+  const range = data.priceRange as { min?: unknown; max?: unknown } | undefined;
+  return {
+    favoriteBrands: strings(data.favoriteBrands),
+    preferredColors: strings(data.preferredColors).filter((value) =>
+      STUDIO_COLORS.some((color) => color.label === value),
+    ),
+    priceRange:
+      range &&
+      typeof range.min === 'number' &&
+      typeof range.max === 'number' &&
+      Number.isFinite(range.min) &&
+      Number.isFinite(range.max) &&
+      range.min >= 0 &&
+      range.max >= range.min
+        ? { min: range.min, max: range.max }
+        : null,
+  };
+}

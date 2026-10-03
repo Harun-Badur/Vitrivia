@@ -1,5 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import PressableScale from './PressableScale';
+import { Check } from 'lucide-react-native';
+import StyleReferenceArt, { STYLE_ART } from './StyleReferenceArt';
 import { colors, radius, spacing } from '../lib/theme';
 import {
   GARMENT_SIZES,
@@ -16,6 +18,7 @@ import {
 } from '../types/profile';
 
 interface SizeStudioCardProps {
+  section?: 'all' | 'body' | 'style';
   profile: UserStudioProfile;
   disabled: boolean;
   onHeightChange: (value: number) => void;
@@ -124,6 +127,7 @@ function ChipGroup<T extends string>({
 }
 
 export default function SizeStudioCard({
+  section = 'all',
   profile,
   disabled,
   onHeightChange,
@@ -141,59 +145,86 @@ export default function SizeStudioCard({
 
   return (
     <View style={styles.card}>
-      <View style={styles.stepperPair}>
-        <Stepper
-          label="Boy"
-          unit="cm"
-          value={height}
-          min={HEIGHT_CM_MIN}
-          max={HEIGHT_CM_MAX}
-          disabled={disabled}
-          onChange={onHeightChange}
-        />
-        <Stepper
-          label="Kilo"
-          unit="kg"
-          value={weight}
-          min={WEIGHT_KG_MIN}
-          max={WEIGHT_KG_MAX}
-          disabled={disabled}
-          onChange={onWeightChange}
-        />
-      </View>
-      <ChipGroup
-        label="Üst beden"
-        options={sizeOptions}
-        selected={profile.topSize}
-        disabled={disabled}
-        onSelect={onTopSizeChange}
-      />
-      <ChipGroup
-        label="Alt beden"
-        options={sizeOptions}
-        selected={profile.bottomSize}
-        disabled={disabled}
-        onSelect={onBottomSizeChange}
-      />
-      <ChipGroup
-        label="Stil"
-        options={STYLE_TAGS.map((tag) => ({
-          value: tag.value,
-          label: tag.label,
-        }))}
-        selected={profile.styleTags}
-        disabled={disabled}
-        onSelect={onStyleToggle}
-      />
+      {section !== 'style' ? (
+        <>
+          <View style={styles.stepperPair}>
+            <Stepper
+              label="Boy"
+              unit="cm"
+              value={height}
+              min={HEIGHT_CM_MIN}
+              max={HEIGHT_CM_MAX}
+              disabled={disabled}
+              onChange={onHeightChange}
+            />
+            <Stepper
+              label="Kilo"
+              unit="kg"
+              value={weight}
+              min={WEIGHT_KG_MIN}
+              max={WEIGHT_KG_MAX}
+              disabled={disabled}
+              onChange={onWeightChange}
+            />
+          </View>
+          <ChipGroup
+            label="Üst beden"
+            options={sizeOptions}
+            selected={profile.topSize}
+            disabled={disabled}
+            onSelect={onTopSizeChange}
+          />
+          <ChipGroup
+            label="Alt beden"
+            options={sizeOptions}
+            selected={profile.bottomSize}
+            disabled={disabled}
+            onSelect={onBottomSizeChange}
+          />
+        </>
+      ) : null}
+      {section !== 'body' ? (
+        <View style={styles.styleGrid}>
+          {STYLE_TAGS.map((tag) => {
+            const active = profile.styleTags.includes(tag.value);
+            return (
+              <Pressable
+                key={tag.value}
+                onPress={() => onStyleToggle(tag.value)}
+                disabled={disabled}
+                style={[styles.styleOption, active && styles.styleOptionActive]}
+                accessibilityRole="button"
+                accessibilityLabel={tag.label}
+                accessibilityState={{ selected: active, disabled }}
+              >
+                <StyleReferenceArt crop={STYLE_ART[tag.value]} />
+                <Text
+                  style={[styles.styleLabel, active && styles.styleLabelActive]}
+                >
+                  {tag.label}
+                </Text>
+                <View
+                  style={[
+                    styles.selectionBadge,
+                    active && styles.selectionBadgeActive,
+                  ]}
+                >
+                  {active ? (
+                    <Check size={13} color={colors.inverseText} />
+                  ) : null}
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: colors.input,
-    borderRadius: radius.card,
-    padding: spacing.md,
+    gap: spacing.sm,
   },
   stepperPair: {
     flexDirection: 'row',
@@ -207,25 +238,23 @@ const styles = StyleSheet.create({
     marginBottom: spacing.lg,
   },
   groupLabel: {
-    color: colors.textSecondary,
-    fontSize: 12,
+    color: colors.text,
+    fontSize: 14,
     fontWeight: '700',
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
     marginBottom: spacing.sm,
   },
   stepperRow: {
-    height: 44,
+    height: 46,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.button,
+    borderRadius: radius.chip,
     paddingHorizontal: spacing.xs,
   },
   stepperButton: {
-    width: 44,
+    width: 32,
     height: 44,
     alignItems: 'center',
     justifyContent: 'center',
@@ -245,24 +274,68 @@ const styles = StyleSheet.create({
   },
   chipRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
+    gap: 6,
   },
   chip: {
-    backgroundColor: colors.bgSoft,
+    flex: 1,
+    minWidth: 0,
+    alignItems: 'center',
+    backgroundColor: colors.hairline,
     borderRadius: radius.chip,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 10,
   },
   chipActive: {
     backgroundColor: colors.accent,
   },
   chipText: {
-    color: colors.textSecondary,
+    color: colors.text,
     fontSize: 12,
     fontWeight: '700',
   },
   chipTextActive: {
     color: colors.inverseText,
+  },
+  styleGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  styleOption: {
+    width: '31%',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.input,
+    overflow: 'hidden',
+  },
+  styleOptionActive: {
+    borderColor: colors.accent,
+    backgroundColor: colors.accentSoft,
+  },
+  styleLabel: {
+    paddingVertical: spacing.sm,
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  styleLabelActive: { color: colors.accent },
+  selectionBadge: {
+    position: 'absolute',
+    top: 5,
+    right: 5,
+    width: 21,
+    height: 21,
+    borderRadius: 11,
+    backgroundColor: colors.input,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectionBadgeActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
   },
 });

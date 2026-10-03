@@ -45,6 +45,10 @@ export const CATEGORY_CHIP_LABELS: Record<GarmentCategory, string> = {
   dresses: 'elbise',
   upper_body: 'üst',
   lower_body: 'alt',
+  shoes: 'ayakkabı',
+  bags: 'çanta',
+  hats: 'şapka',
+  accessories: 'aksesuar',
 };
 
 export const hasAnyFilter = (filters: FeedQueryFilters): boolean => {

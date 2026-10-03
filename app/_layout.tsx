@@ -23,9 +23,8 @@ const registerPushIfSupported = async (userId: string): Promise<void> => {
   }
 
   try {
-    const { registerForPushNotifications } = await import(
-      '../services/notificationService'
-    );
+    const { registerForPushNotifications } =
+      await import('../services/notificationService');
     await registerForPushNotifications(userId);
   } catch (error: unknown) {
     logger.info('Push kaydı atlandı', { error });
@@ -76,7 +75,7 @@ function RootNavigator() {
     return (
       <View style={styles.boot}>
         <ActivityIndicator color={colors.accent} size="large" />
-        <Text style={styles.bootText}>Kabin açılıyor...</Text>
+        <Text style={styles.bootText}>Vitirify açılıyor...</Text>
       </View>
     );
   }
@@ -96,6 +95,7 @@ function RootNavigator() {
     >
       <Stack.Protected guard={user !== null}>
         <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="wardrobe" />
       </Stack.Protected>
       <Stack.Protected guard={user === null}>
         <Stack.Screen name="auth" />

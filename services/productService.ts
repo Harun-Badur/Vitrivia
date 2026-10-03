@@ -1,41 +1,45 @@
+import { DISCOVER_CATALOG_PAGE_SIZE, isRecord, isFeedProductRow, isAttributeRow, mapFeedRow } from './catalogProductAdapter';
 import { MOCK_PRODUCTS } from '../data/mockProducts';
+import { getProductRepository, productsById } from './productRepository';
 import { track } from '../lib/analytics';
-import { buildAffiliateUrl } from '../lib/deeplink';
-import { rerankForDiversity } from '../lib/diversity';
-import { applyFilterMaskProgressive } from '../lib/feedFilter';
-import type { FeedQueryFilters } from '../lib/feedQuery';
-import { hasAnyFilter } from '../lib/feedQuery';
+import { hasAnyFilter, type FeedQueryFilters } from '../lib/feedQuery';
 import { logger } from '../lib/logger';
-import { parseOptionalNumeric } from '../lib/price';
-import { inferProductAttributes } from '../lib/productAttributes';
 import { fetchRecsConfig, fetchStyleProfileSnapshot } from '../lib/recsConfig';
 import { setLastFeedMode, setLastRecommendationId } from '../lib/recsFeedState';
-import { applyFeedMode, emptySessionIntent, rankCandidates } from '../lib/scoring';
+import { emptySessionIntent } from '../lib/scoring';
 import { buildIntent } from '../lib/sessionIntent';
 import { getSupabaseClient } from '../lib/supabase';
-import type {
-  FeedProductRow,
-  FeedProvider,
-  Product,
-  ProductColor,
-  ProductGender,
+import { rankCatalog } from '../src/intelligence/ranking/rankCatalog';
+import { runCooperatively } from '../src/intelligence/cooperativeWork';
+import {
+  ensureNonEmptyFeed,
+  selectLocalFeed,
+} from '../src/intelligence/recommendations/feedFallback';
+import {
+  enrichProduct,
+  type ProductAttributeRow,
+} from '../src/intelligence/style/productStyle';
+import {
+  isGarmentCategory,
+  type Product,
 } from '../types/product';
-import { getDisplayPrice, hasCatalogPriceDrop } from '../types/product';
 import type {
   FeedMode,
-  RecsFeedItem,
   RecsFeedResponse,
-  ScoringCandidate,
   SessionIntent,
 } from '../types/recommendation';
 import { DEFAULT_FEED_MODE } from '../types/recommendation';
-import type { GarmentCategory } from '../types/product';
 
+export { filterProducts } from '../src/intelligence/filters/productFilters';
+export type { ProductFilters } from '../src/intelligence/filters/productFilters';
+export { toScoringCandidate } from '../src/intelligence/ranking/productCandidate';
+export { inferGenderFromTitle } from '../src/intelligence/style/productStyle';
 export type { ProductGender } from '../types/product';
 
 export type FeedSource = 'supabase' | 'mock' | 'edge';
 
 export interface FetchFeedProductsResult {
+  hasMore?: boolean;
   products: Product[];
   source: FeedSource;
   isPersonalized: boolean;
@@ -47,209 +51,9 @@ export interface FetchFeedProductsResult {
 }
 
 const DEFAULT_FEED_LIMIT = 20;
-const FETCH_POOL_MULTIPLIER = 4;
+const CATALOG_PAGE_SIZE = DISCOVER_CATALOG_PAGE_SIZE;
 const EDGE_TIMEOUT_MS = 1_200;
-
-interface ProductAttributeRow {
-  product_id: string;
-  gender: string | null;
-  colors: unknown;
-  fit: string | null;
-  subcategory: string | null;
-  brand_slug: string | null;
-  price_band: string | null;
-}
-
-const isGarmentCategory = (value: string): value is GarmentCategory =>
-  value === 'upper_body' || value === 'lower_body' || value === 'dresses';
-
-const isFeedProvider = (value: string): value is FeedProvider =>
-  value === 'amazon' ||
-  value === 'trendyol' ||
-  value === 'hepsiburada' ||
-  value === 'mock';
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null;
-
-const isFeedProductRow = (value: unknown): value is FeedProductRow => {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return (
-    typeof value.id === 'string' &&
-    typeof value.provider === 'string' &&
-    typeof value.external_id === 'string' &&
-    typeof value.title === 'string' &&
-    (typeof value.brand === 'string' || value.brand === null) &&
-    (typeof value.price === 'number' || typeof value.price === 'string') &&
-    typeof value.currency === 'string' &&
-    typeof value.image_url === 'string' &&
-    typeof value.product_url === 'string' &&
-    typeof value.category === 'string' &&
-    (typeof value.affiliate_url === 'string' || value.affiliate_url === null)
-  );
-};
-
-const isProductColor = (value: unknown): value is ProductColor => {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return typeof value.name === 'string' && typeof value.hex === 'string';
-};
-
-const parseColors = (value: unknown): ProductColor[] | undefined => {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const parsed = value.filter(isProductColor);
-  return parsed.length > 0 ? parsed : undefined;
-};
-
-const parseSizes = (value: unknown): string[] | undefined => {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const parsed = value.filter(
-    (item): item is string => typeof item === 'string' && item.trim().length > 0,
-  );
-  return parsed.length > 0 ? parsed : undefined;
-};
-
-const parseStringArray = (value: unknown): string[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === 'string');
-};
-
-const parseImages = (value: unknown): string[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter(
-    (item): item is string => typeof item === 'string' && item.trim().length > 0,
-  );
-};
-
-const toPrice = (value: number | string): number => {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-  const parsed = Number(String(value).replace(',', '.').replace(/[^\d.-]/g, ''));
-  return Number.isFinite(parsed) ? parsed : 0;
-};
-
-const readRowField = (row: FeedProductRow, key: 'colors' | 'sizes'): unknown => {
-  if (!isRecord(row)) {
-    return undefined;
-  }
-  return row[key];
-};
-
-const isAttributeRow = (value: unknown): value is ProductAttributeRow =>
-  isRecord(value) && typeof value.product_id === 'string';
-
-const mapFeedRow = (row: FeedProductRow): Product | null => {
-  if (!isGarmentCategory(row.category) || !isFeedProvider(row.provider)) {
-    return null;
-  }
-
-  const brand = row.brand?.trim() || 'Kabin';
-  const productUrl = row.product_url;
-  const affiliateUrl =
-    row.affiliate_url?.trim() ||
-    buildAffiliateUrl(row.provider, productUrl);
-  const garmentDescription = `${brand} ${row.title}`.trim();
-
-  const listPrice = toPrice(row.price);
-  const currentPrice = parseOptionalNumeric(row.current_price);
-  const images = parseImages(row.images);
-  const imageUrl = images[0] ?? row.image_url;
-
-  return {
-    id: row.id,
-    imageUrl,
-    images: images.length > 0 ? images : undefined,
-    title: row.title,
-    price: listPrice,
-    currentPrice,
-    previousPrice: parseOptionalNumeric(row.previous_price),
-    lastPriceCheckedAt:
-      typeof row.last_price_checked_at === 'string'
-        ? row.last_price_checked_at
-        : undefined,
-    createdAt: typeof row.created_at === 'string' ? row.created_at : undefined,
-    brand,
-    category: row.category,
-    garmentDescription,
-    provider: row.provider,
-    productUrl,
-    affiliateUrl,
-    externalId: row.external_id,
-    colors: parseColors(readRowField(row, 'colors')),
-    sizes: parseSizes(readRowField(row, 'sizes')),
-  };
-};
-
-const isProductGender = (value: string): value is ProductGender =>
-  value === 'women' || value === 'men' || value === 'unisex';
-
-const enrichProduct = (
-  product: Product,
-  attr: ProductAttributeRow | undefined,
-): Product => {
-  const inferred = inferProductAttributes({
-    title: product.title,
-    brand: product.brand,
-    price: getDisplayPrice(product),
-    category: product.category,
-    existingColorNames: product.colors?.map((color) => color.name),
-  });
-  const colorSlugs =
-    attr !== undefined && parseStringArray(attr.colors).length > 0
-      ? parseStringArray(attr.colors)
-      : inferred.colors;
-  const genderRaw = attr?.gender ?? inferred.gender;
-  return {
-    ...product,
-    gender: isProductGender(genderRaw) ? genderRaw : inferred.gender,
-    colorSlugs,
-    fit: attr?.fit ?? inferred.fit,
-    subcategory: attr?.subcategory ?? inferred.subcategory,
-    brandSlug: attr?.brand_slug ?? inferred.brand_slug,
-    priceBand: attr?.price_band ?? inferred.price_band,
-  };
-};
-
-export const toScoringCandidate = (product: Product): ScoringCandidate => {
-  const inferred = inferProductAttributes({
-    title: product.title,
-    brand: product.brand,
-    price: getDisplayPrice(product),
-    category: product.category,
-    existingColorNames: product.colors?.map((color) => color.name),
-  });
-  const createdAtMs = product.createdAt ? Date.parse(product.createdAt) : 0;
-  return {
-    id: product.id,
-    brand: product.brand,
-    brandSlug: product.brandSlug ?? inferred.brand_slug,
-    category: product.category,
-    subcategory: product.subcategory ?? inferred.subcategory,
-    fit: product.fit ?? inferred.fit,
-    colors:
-      product.colorSlugs && product.colorSlugs.length > 0
-        ? product.colorSlugs
-        : inferred.colors,
-    priceBand: product.priceBand ?? inferred.price_band,
-    price: getDisplayPrice(product),
-    gender: product.gender ?? inferred.gender,
-    createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : 0,
-    impressionCount: product.impressionCount ?? 0,
-    deal: hasCatalogPriceDrop(product) ? 1 : 0,
-  };
-};
+let edgeSupportsPagination: boolean | undefined;
 
 const isProductSnapshotLite = (value: unknown): value is Product => {
   if (!isRecord(value)) {
@@ -267,7 +71,15 @@ const isProductSnapshotLite = (value: unknown): value is Product => {
   );
 };
 
-const parseFeedItem = (value: unknown): RecsFeedItem | null => {
+interface FeedItemReference {
+  productId: string;
+  score: number;
+  reasons: string[];
+  position: number;
+}
+type FeedResponseReferences = Omit<RecsFeedResponse, 'items'> & { items: FeedItemReference[] };
+
+const parseFeedItem = (value: unknown): FeedItemReference | null => {
   if (!isRecord(value)) {
     return null;
   }
@@ -285,33 +97,15 @@ const parseFeedItem = (value: unknown): RecsFeedItem | null => {
     typeof value.position === 'number' && Number.isFinite(value.position)
       ? value.position
       : 0;
-  const firstReason = reasons[0]?.trim();
-  const edgeImages = parseImages(
-    isRecord(value.product) ? value.product.images : undefined,
-  );
-  const edgeImageUrl =
-    edgeImages[0] ??
-    (typeof value.product.imageUrl === 'string' ? value.product.imageUrl : '');
-  const product: Product = {
-    ...value.product,
-    imageUrl: edgeImageUrl,
-    images: edgeImages.length > 0 ? edgeImages : undefined,
-    garmentDescription:
-      typeof value.product.garmentDescription === 'string' &&
-      value.product.garmentDescription.trim().length > 0
-        ? value.product.garmentDescription
-        : `${value.product.brand} ${value.product.title}`,
-    reason: firstReason && firstReason.length > 0 ? firstReason : undefined,
-  };
   return {
-    product,
+    productId: value.product.id,
     score,
     reasons,
     position,
   };
 };
 
-const parseFeedResponse = (value: unknown): RecsFeedResponse | null => {
+const parseFeedResponse = (value: unknown): FeedResponseReferences | null => {
   if (!isRecord(value)) {
     return null;
   }
@@ -325,7 +119,7 @@ const parseFeedResponse = (value: unknown): RecsFeedResponse | null => {
   }
   const items = value.items
     .map(parseFeedItem)
-    .filter((item): item is RecsFeedItem => item !== null);
+    .filter((item): item is FeedItemReference => item !== null);
   const relaxed = Array.isArray(value.relaxed)
     ? value.relaxed.filter((item): item is string => typeof item === 'string')
     : [];
@@ -334,6 +128,7 @@ const parseFeedResponse = (value: unknown): RecsFeedResponse | null => {
     score_id: value.score_id,
     config_version: value.config_version,
     items,
+    has_more: typeof value.has_more === 'boolean' ? value.has_more : undefined,
     fallback: value.fallback === true,
     relaxed,
   };
@@ -367,15 +162,28 @@ export const getRecsFeedUrl = (): string | null => {
 };
 
 const neverEmpty = (products: Product[]): Product[] =>
-  products.length > 0 ? products : MOCK_PRODUCTS;
+  ensureNonEmptyFeed(products, MOCK_PRODUCTS);
 
-const fetchCatalog = async (): Promise<Product[]> => {
+const CATALOG_CACHE_MS = 60_000;
+type CatalogQueryResult = { data: unknown[] | null; error: { message: string } | null };
+const catalogPages = new Map<string, { at: number; result: Promise<CatalogQueryResult> }>();
+const preparedCatalogProducts = new Map<string, { at: number; key: string; product: Product }>();
+let catalogCacheClient: ReturnType<typeof getSupabaseClient>;
+
+const queryCatalogPage = async (
+  excludeIds: readonly string[] = [],
+  offset = 0,
+): Promise<{ products: Product[]; hasMore: boolean }> => {
   const client = getSupabaseClient();
   if (!client) {
-    return [];
+    throw new Error('Supabase bağlantısı yok');
+  }
+  if (catalogCacheClient !== client) {
+    catalogPages.clear();
+    preparedCatalogProducts.clear();
+    catalogCacheClient = client;
   }
 
-  const poolLimit = Math.max(DEFAULT_FEED_LIMIT * FETCH_POOL_MULTIPLIER, DEFAULT_FEED_LIMIT);
   const productSelectWithImages =
     'id, provider, external_id, title, brand, price, current_price, previous_price, last_price_checked_at, currency, image_url, images, product_url, category, affiliate_url, colors, sizes, created_at';
   const productSelectLegacy =
@@ -384,33 +192,65 @@ const fetchCatalog = async (): Promise<Product[]> => {
   let productsResult: {
     data: unknown[] | null;
     error: { message: string } | null;
-  } = await client
-    .from('products')
-    .select(productSelectWithImages)
-    .limit(poolLimit);
+  } = await catalogQuery(productSelectWithImages);
+
+  function catalogQuery(columns: string) {
+    const serverExclusions = excludeIds.slice(0, CATALOG_PAGE_SIZE);
+    const key = JSON.stringify([columns, [...serverExclusions].sort(), offset]);
+    const cached = catalogPages.get(key);
+    if (cached && Date.now() - cached.at < CATALOG_CACHE_MS) return cached.result;
+    let query = client!.from('products').select(columns).order('created_at', { ascending: true }).order('id');
+    if (excludeIds.length > 0) {
+      // Bound the GET URL: a long session of UUIDs can exceed gateway URL limits.
+      query = query.not('id', 'in', `(${excludeIds.slice(0, CATALOG_PAGE_SIZE).map(id => `"${id.replace(/["\\]/g, '')}"`).join(',')})`);
+    }
+    const entry = { at: Date.now(), result: Promise.resolve(query.range(offset, offset + CATALOG_PAGE_SIZE)) };
+    catalogPages.set(key, entry);
+    if (catalogPages.size > 12) catalogPages.delete(catalogPages.keys().next().value!);
+    void entry.result.then(result => {
+      if (result.error && catalogPages.get(key) === entry) catalogPages.delete(key);
+    }, () => { if (catalogPages.get(key) === entry) catalogPages.delete(key); });
+    return entry.result;
+  }
 
   if (
     productsResult.error &&
     /column .*images.* does not exist/i.test(productsResult.error.message)
   ) {
     logger.warn('products.images yok; legacy select kullanılıyor');
-    productsResult = await client
-      .from('products')
-      .select(productSelectLegacy)
-      .limit(poolLimit);
+    productsResult = await catalogQuery(productSelectLegacy);
   }
 
-  const attributesResult = await client
+  if (productsResult.error) throw new Error(productsResult.error.message);
+  const excluded = new Set(excludeIds);
+  const rows = (productsResult.data ?? []).slice(0, CATALOG_PAGE_SIZE)
+    .filter(row => !isRecord(row) || typeof row.id !== 'string' || !excluded.has(row.id));
+  const validRows = rows.filter(isFeedProductRow);
+  const cachedProducts = new Map<string, Product>();
+  const ids: string[] = [];
+  for (const row of validRows) {
+    const cached = preparedCatalogProducts.get(row.id);
+    if (cached && Date.now() - cached.at < CATALOG_CACHE_MS && cached.key === JSON.stringify(row)) {
+      cachedProducts.set(row.id, cached.product);
+    } else ids.push(row.id);
+  }
+  if (validRows.length === 0) return { products: [], hasMore: (productsResult.data?.length ?? 0) > CATALOG_PAGE_SIZE };
+
+  let attributesResult: { data: unknown[] | null; error: { message: string } | null } = ids.length === 0
+    ? { data: [], error: null } : await client
     .from('product_attributes')
     .select(
-      'product_id, gender, colors, fit, subcategory, brand_slug, price_band',
-    );
+      'product_id, gender, colors, fit, subcategory, brand_slug, price_band, outfit_role',
+    ).in('product_id', ids);
 
-  if (productsResult.error) {
-    logger.error('Supabase ürün feedi alınamadı', {
-      detail: productsResult.error.message,
-    });
-    return [];
+  if (
+    attributesResult.error &&
+    /column .*outfit_role.* does not exist/i.test(attributesResult.error.message)
+  ) {
+    attributesResult = await client
+      .from('product_attributes')
+      .select('product_id, gender, colors, fit, subcategory, brand_slug, price_band')
+      .in('product_id', ids);
   }
 
   const attributesById = new Map<string, ProductAttributeRow>();
@@ -420,11 +260,56 @@ const fetchCatalog = async (): Promise<Product[]> => {
     }
   }
 
-  return (productsResult.data ?? [])
-    .filter(isFeedProductRow)
-    .map(mapFeedRow)
-    .filter((product): product is Product => product !== null)
-    .map((product) => enrichProduct(product, attributesById.get(product.id)));
+  const repository = getProductRepository();
+  function* prepareProducts(): Generator<void, Product[], void> {
+    const products: Product[] = [];
+    for (const row of validRows) {
+      const cached = cachedProducts.get(row.id);
+      if (cached) products.push(cached);
+      else {
+        const product = mapFeedRow(row);
+        if (product) {
+          const enriched = repository.register([enrichProduct(product, attributesById.get(product.id))])[0];
+          products.push(enriched);
+          if (!attributesResult.error) {
+            preparedCatalogProducts.set(row.id, { at: Date.now(), key: JSON.stringify(row), product: enriched });
+            if (preparedCatalogProducts.size > 400) preparedCatalogProducts.delete(preparedCatalogProducts.keys().next().value!);
+          }
+        }
+      }
+      yield;
+    }
+    return products;
+  }
+  const prepared = await runCooperatively(prepareProducts());
+  const resolved = await repository.productsById(prepared.map(product => product.id));
+  const products = prepared.map(product => resolved.get(product.id)!);
+  return { products, hasMore: (productsResult.data?.length ?? 0) > CATALOG_PAGE_SIZE };
+};
+
+let initialCatalogRequest: Promise<{ products: Product[]; hasMore: boolean }> | null = null;
+const fetchCatalogPage = (excludeIds: readonly string[] = [], offset = 0) => {
+  if (excludeIds.length > 0 || offset > 0) return queryCatalogPage(excludeIds, offset);
+  if (!initialCatalogRequest) {
+    initialCatalogRequest = queryCatalogPage().finally(() => { initialCatalogRequest = null; });
+  }
+  return initialCatalogRequest;
+};
+
+// Keep the existing bounded recommendation pool; reuse it on focus without re-ranking.
+let recommendationPool: { products: Product[]; at: number } | null = null;
+let recommendationRequest: Promise<Product[]> | null = null;
+export const fetchRecommendationCatalog = (): Promise<Product[]> => {
+  if (recommendationPool && Date.now() - recommendationPool.at < 60_000) {
+    return Promise.resolve(recommendationPool.products);
+  }
+  if (!recommendationRequest) {
+    recommendationRequest = fetchCatalogPage().then(({ products }) => {
+      recommendationPool = { products, at: Date.now() };
+      return products;
+    }).finally(() => { recommendationRequest = null; });
+  }
+  return recommendationRequest;
 };
 
 const rankLocally = async (
@@ -438,50 +323,9 @@ const rankLocally = async (
     fetchRecsConfig(),
     fetchStyleProfileSnapshot(userId),
   ]);
-  const rankedConfig = applyFeedMode(config, mode);
-  const candidates = catalog
-    .map(toScoringCandidate)
-    .filter((candidate) => {
-      if (
-        intent.constraints.category !== null &&
-        candidate.category !== intent.constraints.category
-      ) {
-        return false;
-      }
-      if (intent.constraints.gender !== null) {
-        if (
-          candidate.gender !== intent.constraints.gender &&
-          candidate.gender !== 'unisex'
-        ) {
-          return false;
-        }
-      }
-      return true;
-    });
-
-  const nowMs = Date.now();
-  const scored = rankCandidates(
-    candidates,
-    profile,
-    intent,
-    rankedConfig,
-    nowMs,
-    userId,
+  return neverEmpty(
+    rankCatalog(catalog, userId, intent, limit, mode, config, profile),
   );
-  const ranked = rerankForDiversity(
-    scored,
-    intent,
-    rankedConfig,
-    profile,
-    limit,
-    nowMs,
-  );
-  const byId = new Map(catalog.map((product) => [product.id, product]));
-  const ordered = ranked.flatMap((item) => {
-    const product = byId.get(item.candidate.id);
-    return product ? [product] : [];
-  });
-  return neverEmpty(ordered.length > 0 ? ordered : catalog.slice(0, limit));
 };
 
 const fetchEdgeFeed = async (
@@ -490,10 +334,11 @@ const fetchEdgeFeed = async (
   limit: number,
   mode: FeedMode,
   filters: FeedQueryFilters = {},
+  excludeIds: readonly string[] = [],
 ): Promise<RecsFeedResponse | null> => {
   const url = getRecsFeedUrl();
   const client = getSupabaseClient();
-  if (!url || !client) {
+  if (!url || !client || (edgeSupportsPagination === false && excludeIds.length > 0)) {
     return null;
   }
 
@@ -520,6 +365,7 @@ const fetchEdgeFeed = async (
         intent,
         mode,
         filters: hasAnyFilter(filters) ? filters : undefined,
+        exclude_ids: excludeIds,
       }),
       signal: controller.signal,
     });
@@ -528,10 +374,18 @@ const fetchEdgeFeed = async (
       return null;
     }
     const parsed = parseFeedResponse(await response.json());
-    if (!parsed || parsed.items.length === 0) {
-      return null;
-    }
-    return parsed;
+    if (!parsed) return null;
+    edgeSupportsPagination = typeof parsed.has_more === 'boolean';
+    // Preserve the first legacy ranking, but never reuse a finite legacy response as a next page.
+    if (!edgeSupportsPagination && (excludeIds.length > 0 || parsed.items.length === 0)) return null;
+    const resolved = await productsById(parsed.items.map(item => item.productId));
+    // A missing catalog record follows the existing unavailable-edge fallback.
+    if (parsed.items.some(item => !resolved.has(item.productId))) return null;
+    return { ...parsed, items: parsed.items.map(({ productId, ...metadata }) => {
+      const product = resolved.get(productId)!;
+      product.reason = metadata.reasons[0]?.trim() || undefined;
+      return { ...metadata, product };
+    }) };
   } catch (error) {
     logger.debug('recs-feed çağrısı düştü', { error });
     return null;
@@ -546,6 +400,7 @@ export const fetchFeedProducts = async (
   mode: FeedMode = DEFAULT_FEED_MODE,
   filters: FeedQueryFilters = {},
   telemetryMode?: 'personal' | 'trend' | 'search',
+  excludeIds: readonly string[] = [],
 ): Promise<FetchFeedProductsResult> => {
   const startedAt = Date.now();
   const intent = userId ? buildIntent() : emptySessionIntent();
@@ -556,8 +411,10 @@ export const fetchFeedProducts = async (
   setLastFeedMode(telemetryMode ?? mode);
 
   if (userId) {
-    const edge = await fetchEdgeFeed(userId, intent, limit, mode, filters);
-    if (edge) {
+    const edge = await fetchEdgeFeed(userId, intent, limit, mode, filters, excludeIds);
+    const excluded = new Set(excludeIds);
+    // An empty/non-progressing batch with hasMore cannot be advanced using ID exclusions.
+    if (edge && (edge.has_more === false || edge.items.some(item => !excluded.has(item.product.id)))) {
       setLastRecommendationId(edge.recommendation_id);
       logger.debug('recs-feed timing', {
         ms: Date.now() - startedAt,
@@ -565,8 +422,13 @@ export const fetchFeedProducts = async (
         n: edge.items.length,
         fallback: edge.fallback === true,
       });
-      const edgeProducts = neverEmpty(edge.items.map((item) => item.product));
+      const edgeProducts = edge.items.map((item) => item.product).filter(product => {
+        if (excluded.has(product.id)) return false;
+        excluded.add(product.id);
+        return true;
+      });
       return {
+        hasMore: edge.has_more ?? true,
         products: edgeProducts,
         source: 'edge',
         isPersonalized: true,
@@ -580,165 +442,60 @@ export const fetchFeedProducts = async (
     track('feed_fallback', null, { reason: 'edge_unavailable' });
   }
 
-  const catalog = await fetchCatalog();
-  if (catalog.length === 0) {
-    logger.warn('Katalog boş; mock ürünlere düşülüyor.');
-    return {
-      products: MOCK_PRODUCTS,
-      source: 'mock',
-      isPersonalized: false,
-    };
+  let offset = 0;
+  let page = await fetchCatalogPage(excludeIds, offset);
+  const poolRows = [...page.products];
+  while (poolRows.length < CATALOG_PAGE_SIZE && page.hasMore) {
+    offset += CATALOG_PAGE_SIZE;
+    page = await fetchCatalogPage(excludeIds, offset);
+    poolRows.push(...page.products);
   }
-
-  const applyLocalFilters = (
-    products: Product[],
-  ): { products: Product[]; fallback: boolean; relaxed: string[] } => {
-    if (!hasAnyFilter(filters)) {
-      return { products, fallback: false, relaxed: [] };
-    }
-    const masked = applyFilterMaskProgressive(products, filters, (p) => p);
-    return {
-      products: masked.items,
-      fallback: masked.fallback,
-      relaxed: masked.relaxed,
-    };
-  };
+  // Keep the original bounded ranking workload; later products remain available for future batches.
+  const catalog = [...new Map(poolRows.map(product => [product.id, product])).values()].slice(0, CATALOG_PAGE_SIZE);
+  const poolHasMore = page.hasMore || poolRows.length > catalog.length;
+  if (catalog.length === 0) return { products: [], hasMore: false, source: 'supabase', isPersonalized: false };
 
   if (!userId) {
-    const filtered = applyLocalFilters(catalog);
-    const usedPersonal = filtered.products.length === 0 && hasAnyFilter(filters);
-    const catalogSlice = (filtered.products.length > 0
-      ? filtered.products
-      : catalog
-    ).slice(0, limit);
+    const selected = selectLocalFeed(catalog, filters, limit);
     return {
-      products: catalogSlice,
+      products: selected.products,
+      hasMore: poolHasMore || catalog.length > selected.products.length,
       source: 'supabase',
       isPersonalized: false,
-      fallback: filtered.fallback || usedPersonal,
-      relaxed: filtered.relaxed,
+      fallback: selected.fallback,
+      relaxed: selected.relaxed,
     };
   }
 
   try {
     const ranked = await rankLocally(catalog, userId, intent, limit * 3, mode);
-    const filtered = applyLocalFilters(ranked);
-    const usedPersonal = filtered.products.length === 0 && hasAnyFilter(filters);
-    const sliced = (filtered.products.length > 0
-      ? filtered.products
-      : ranked
-    ).slice(0, limit);
+    const selected = selectLocalFeed(ranked, filters, limit);
     logger.debug('recs-feed timing', {
       ms: Date.now() - startedAt,
       source: 'supabase',
-      n: sliced.length,
-      fallback: filtered.fallback || usedPersonal,
-      relaxed: filtered.relaxed,
+      n: selected.selectedCount,
+      fallback: selected.fallback,
+      relaxed: selected.relaxed,
     });
     return {
-      products: neverEmpty(sliced),
+      products: selected.products,
+      hasMore: poolHasMore || catalog.length > selected.products.length,
       source: 'supabase',
       isPersonalized: true,
-      fallback: filtered.fallback || usedPersonal,
-      relaxed: filtered.relaxed,
+      fallback: selected.fallback,
+      relaxed: selected.relaxed,
     };
   } catch (error) {
     logger.debug('Yerel skorlama düştü; katalog sırası kullanılıyor', { error });
     track('feed_fallback', null, { reason: 'local_rank_failed' });
-    const filtered = applyLocalFilters(catalog);
-    const usedPersonal = filtered.products.length === 0 && hasAnyFilter(filters);
-    const fallbackProducts = neverEmpty(
-      (filtered.products.length > 0 ? filtered.products : catalog).slice(0, limit),
-    );
+    const selected = selectLocalFeed(catalog, filters, limit);
     return {
-      products: fallbackProducts,
+      products: selected.products,
+      hasMore: poolHasMore || catalog.length > selected.products.length,
       source: 'supabase',
       isPersonalized: false,
-      fallback: filtered.fallback || usedPersonal,
-      relaxed: filtered.relaxed,
+      fallback: selected.fallback,
+      relaxed: selected.relaxed,
     };
   }
-};
-
-export interface ProductFilters {
-  query?: string;
-  category?: GarmentCategory | null;
-  gender?: ProductGender | null;
-  size?: string | null;
-  color?: string | null;
-  priceMin?: number | null;
-  priceMax?: number | null;
-  brand?: string | null;
-  style?: string | null;
-  text?: string | null;
-}
-
-const GENDER_MEN_TOKENS = ['erkek', 'oğlan', 'oglan'] as const;
-const GENDER_WOMEN_TOKENS = ['kadın', 'kadin', 'kız', 'kiz'] as const;
-
-const titleHasToken = (title: string, token: string): boolean => {
-  const haystack = title.toLocaleLowerCase('tr-TR');
-  const needle = token.toLocaleLowerCase('tr-TR');
-  const start = haystack.indexOf(needle);
-  if (start < 0) {
-    return false;
-  }
-  const before = start === 0 ? '' : haystack[start - 1];
-  const afterIndex = start + needle.length;
-  const after = afterIndex >= haystack.length ? '' : haystack[afterIndex];
-  const isBoundary = (char: string): boolean =>
-    char.length === 0 || /[^a-z0-9ğüşöçı]/i.test(char);
-  return isBoundary(before ?? '') && isBoundary(after ?? '');
-};
-
-export const inferGenderFromTitle = (title: string): ProductGender => {
-  if (GENDER_MEN_TOKENS.some((token) => titleHasToken(title, token))) {
-    return 'men';
-  }
-  if (GENDER_WOMEN_TOKENS.some((token) => titleHasToken(title, token))) {
-    return 'women';
-  }
-  return 'unisex';
-};
-
-const normalizeSearch = (value: string): string =>
-  value.trim().toLocaleLowerCase('tr-TR');
-
-export const filterProducts = (
-  products: Product[],
-  filters: ProductFilters,
-): Product[] => {
-  const query = filters.query ? normalizeSearch(filters.query) : '';
-  const category = filters.category ?? null;
-  const gender = filters.gender ?? null;
-  const size = filters.size?.trim() ?? null;
-
-  return products.filter((product) => {
-    if (query.length > 0) {
-      const haystack = `${product.brand} ${product.title}`;
-      if (!normalizeSearch(haystack).includes(query)) {
-        return false;
-      }
-    }
-
-    if (category !== null && product.category !== category) {
-      return false;
-    }
-
-    if (gender !== null) {
-      const productGender = product.gender ?? inferGenderFromTitle(product.title);
-      if (productGender !== gender && productGender !== 'unisex') {
-        return false;
-      }
-    }
-
-    if (size !== null) {
-      const sizes = product.sizes ?? [];
-      if (!sizes.includes(size)) {
-        return false;
-      }
-    }
-
-    return true;
-  });
 };

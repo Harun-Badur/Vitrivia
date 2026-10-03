@@ -10,36 +10,21 @@
       "android": {
         "buildType": "apk"
       },
-      "env": {
-        "EXPO_PUBLIC_SUPABASE_URL": "https://hnujkabyyrlsxohjhxlg.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhudWprYWJ5eXJsc3hvaGpoeGxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyMzExODUsImV4cCI6MjEwMjgwNzE4NX0.Sw-N953VRbm5VFniyDqzD-wQTjeJ3CrNYmwKBoGXCv8",
-        "EXPO_PUBLIC_VTON_PROXY_URL": "https://hnujkabyyrlsxohjhxlg.functions.supabase.co/vton-proxy",
-        "EXPO_PUBLIC_RECS_FEED_URL": "https://hnujkabyyrlsxohjhxlg.functions.supabase.co/recs-feed"
-      }
+      "environment": "development"
     },
     "preview": {
       "distribution": "internal",
       "android": {
         "buildType": "apk"
       },
-      "env": {
-        "EXPO_PUBLIC_SUPABASE_URL": "https://hnujkabyyrlsxohjhxlg.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhudWprYWJ5eXJsc3hvaGpoeGxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyMzExODUsImV4cCI6MjEwMjgwNzE4NX0.Sw-N953VRbm5VFniyDqzD-wQTjeJ3CrNYmwKBoGXCv8",
-        "EXPO_PUBLIC_VTON_PROXY_URL": "https://hnujkabyyrlsxohjhxlg.functions.supabase.co/vton-proxy",
-        "EXPO_PUBLIC_RECS_FEED_URL": "https://hnujkabyyrlsxohjhxlg.functions.supabase.co/recs-feed"
-      }
+      "environment": "preview"
     },
     "production": {
       "autoIncrement": true,
       "android": {
         "buildType": "app-bundle"
       },
-      "env": {
-        "EXPO_PUBLIC_SUPABASE_URL": "https://hnujkabyyrlsxohjhxlg.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhudWprYWJ5eXJsc3hvaGpoeGxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyMzExODUsImV4cCI6MjEwMjgwNzE4NX0.Sw-N953VRbm5VFniyDqzD-wQTjeJ3CrNYmwKBoGXCv8",
-        "EXPO_PUBLIC_VTON_PROXY_URL": "https://hnujkabyyrlsxohjhxlg.functions.supabase.co/vton-proxy",
-        "EXPO_PUBLIC_RECS_FEED_URL": "https://hnujkabyyrlsxohjhxlg.functions.supabase.co/recs-feed"
-      }
+      "environment": "production"
     }
   },
   "submit": {

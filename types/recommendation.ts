@@ -202,6 +202,8 @@ export interface RecsFeedItem {
 }
 
 export interface RecsFeedResponse {
+  /** Remaining eligible products after this batch; absent on older Edge deployments. */
+  has_more?: boolean;
   recommendation_id: string;
   score_id: string;
   config_version: string;

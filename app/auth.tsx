@@ -30,7 +30,7 @@ export default function AuthScreen() {
   const [message, setMessage] = useState<string | null>(null);
   const [isInfoMessage, setIsInfoMessage] = useState(false);
 
-  const title = mode === 'login' ? 'Kabin\'e hoş geldin' : 'Kabin hesabı oluştur';
+  const title = mode === 'login' ? 'Vitirify\'a hoş geldin' : 'Vitirify hesabı oluştur';
   const submitLabel = mode === 'login' ? 'Giriş yap' : 'Kayıt ol';
   const toggleLabel =
     mode === 'login'
@@ -97,7 +97,7 @@ export default function AuthScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <View style={styles.card}>
-        <Text style={styles.brand}>Kabin</Text>
+        <Text style={styles.brand}>Vitirify</Text>
         <Text style={styles.title}>{title}</Text>
         <Text style={styles.subtitle}>
           Beğenilerin dolabında kalsın. Sanal denemeye devam etmek için giriş

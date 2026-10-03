@@ -15,6 +15,7 @@ interface FeedModeOption {
 }
 
 interface FeedModeSegmentProps {
+  overlay?: boolean;
   value: FeedMode;
   onChange: (mode: FeedMode) => void;
 }
@@ -29,6 +30,7 @@ const SEGMENT_HIT_SLOP = { top: 8, bottom: 8, left: 4, right: 4 } as const;
 export default function FeedModeSegment({
   value,
   onChange,
+  overlay = false,
 }: FeedModeSegmentProps) {
   const [optionWidths, setOptionWidths] = useState<number[]>([0, 0]);
   const pillX = useSharedValue<number>(layout.segmentInset);
@@ -54,11 +56,13 @@ export default function FeedModeSegment({
 
   return (
     <View
-      style={styles.track}
+      style={[styles.track, overlay && styles.overlayTrack]}
       accessibilityRole="tablist"
       accessibilityLabel="Keşif modu"
     >
-      <Animated.View pointerEvents="none" style={[styles.pill, pillStyle]} />
+      {!overlay ? (
+        <Animated.View pointerEvents="none" style={[styles.pill, pillStyle]} />
+      ) : null}
       {OPTIONS.map((option, index) => {
         const isActive = option.mode === value;
         return (
@@ -80,14 +84,22 @@ export default function FeedModeSegment({
                 return next;
               });
             }}
-            style={styles.option}
+            style={[styles.option, overlay && styles.overlayOption, overlay && isActive && styles.overlayActiveOption]}
             hitSlop={SEGMENT_HIT_SLOP}
             accessibilityRole="tab"
             accessibilityState={{ selected: isActive }}
             accessibilityLabel={option.label}
           >
             <Text
-              style={[styles.label, isActive ? styles.labelActive : null]}
+              style={[
+                styles.label,
+                isActive ? styles.labelActive : null,
+                overlay && {
+                  color: colors.inverseText,
+                  opacity: isActive ? 1 : 0.65,
+                  fontSize: 12,
+                },
+              ]}
               numberOfLines={1}
             >
               {option.label}
@@ -100,6 +112,9 @@ export default function FeedModeSegment({
 }
 
 const styles = StyleSheet.create({
+  overlayTrack: { padding: 0, backgroundColor: 'transparent' },
+  overlayOption: { paddingHorizontal: 6, marginRight: 10 },
+  overlayActiveOption: { borderBottomWidth: 1, borderBottomColor: colors.inverseText },
   track: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
@@ -115,6 +130,8 @@ const styles = StyleSheet.create({
     left: 0,
     backgroundColor: colors.segmentActiveBg,
     borderRadius: radius.chip,
+    borderWidth: 1,
+    borderColor: colors.border,
     ...shadows.segment,
   },
   option: {
@@ -124,7 +141,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: layout.segmentOptionPaddingX,
   },
   label: {
-    color: colors.segmentPassiveText,
+    color: colors.tabInactive,
     fontSize: 14,
     fontWeight: '600',
   },

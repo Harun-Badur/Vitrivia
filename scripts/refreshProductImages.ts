@@ -6,12 +6,16 @@ import {
   extractProductImages,
   type ProductImageSource,
 } from './lib/extractProductImage';
-import type { FeedProvider } from '../types/product';
-import type { GarmentCategory } from '../types/product';
+import {
+  isFeedProvider,
+  isGarmentCategory,
+  type FeedProvider,
+  type GarmentCategory,
+} from '../types/product';
 
 loadEnv();
 
-const IMAGE_FALLBACK: Record<GarmentCategory, string> = {
+const IMAGE_FALLBACK: Partial<Record<GarmentCategory, string>> = {
   upper_body:
     'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=800',
   lower_body:
@@ -39,15 +43,6 @@ interface RefreshResult {
   source: ProductImageSource;
   httpStatus: number;
 }
-
-const isFeedProvider = (value: string): value is FeedProvider =>
-  value === 'amazon' ||
-  value === 'trendyol' ||
-  value === 'hepsiburada' ||
-  value === 'mock';
-
-const isGarmentCategory = (value: string): value is GarmentCategory =>
-  value === 'upper_body' || value === 'lower_body' || value === 'dresses';
 
 const toProductRow = (row: {
   id: string;
@@ -136,10 +131,7 @@ const refreshProductImages = async (): Promise<void> => {
   const results: RefreshResult[] = [];
 
   for (const product of products) {
-    const category = isGarmentCategory(product.category)
-      ? product.category
-      : 'upper_body';
-    const fallbackUrl = IMAGE_FALLBACK[category];
+    const fallbackUrl = IMAGE_FALLBACK[product.category] ?? product.image_url;
     const extracted = await extractProductImages(
       product.product_url,
       product.provider,

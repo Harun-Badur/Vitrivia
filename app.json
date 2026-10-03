@@ -1,7 +1,6 @@
 {
   "expo": {
-    "name": "Kabin",
-    "displayName": "Kabin",
+    "name": "Vitirify",
     "slug": "kabin",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -17,6 +16,7 @@
     },
     "android": {
       "package": "com.kabin.app",
+      "softwareKeyboardLayoutMode": "pan",
       "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#FE382B",
@@ -26,11 +26,11 @@
       "permissions": [
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.INTERNET",
-        "android.permission.VIBRATE"
+        "android.permission.VIBRATE",
+        "android.permission.CAMERA"
       ],
       "blockedPermissions": [
-        "android.permission.RECORD_AUDIO",
-        "android.permission.CAMERA"
+        "android.permission.RECORD_AUDIO"
       ],
       "predictiveBackGestureEnabled": false
     },
@@ -50,7 +50,8 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Sanal deneme için galerindeki fotoğraflara erişmemiz gerekiyor."
+          "photosPermission": "Kıyafet ekleme ve sanal deneme için galerindeki fotoğraflara erişmemiz gerekiyor.",
+          "cameraPermission": "Dolabına kıyafet eklemek için kameraya erişmemiz gerekiyor."
         }
       ],
       [
@@ -60,7 +61,9 @@
           "color": "#FE382B"
         }
       ],
-      "expo-router"
+      "expo-router",
+      "expo-image",
+      "expo-status-bar"
     ],
     "extra": {
       "eas": {

@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   StyleSheet,
+  StatusBar,
   Text,
   TextInput,
   useWindowDimensions,
@@ -8,7 +16,7 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Search, SlidersHorizontal, X } from 'lucide-react-native';
 import {
@@ -29,6 +37,7 @@ import SwipeHintOverlay from '../../components/SwipeHintOverlay';
 import VirtualTryOnModal from '../../components/VirtualTryOnModal';
 import { useAuthContext } from '../../hooks/useAuthContext';
 import { logger } from '../../lib/logger';
+import { getSupabaseClient } from '../../lib/supabase';
 import { track, trackFeedImpression } from '../../lib/analytics';
 import {
   countActiveFilters,
@@ -45,7 +54,6 @@ import {
   colors,
   discoverCardLiftForHeight,
   estimateDiscoverCardHeight,
-  headerToDeckForHeight,
   layout,
   radius,
   shadows,
@@ -55,17 +63,23 @@ import {
   getRedirectLabel,
   openProductPage,
 } from '../../services/deeplinkService';
+import { fetchRecommendationCatalog } from '../../services/productService';
+import { DiscoverRecommendationCache } from '../../lib/discoverRecommendationCache';
+import { loadDiscoverRecommendationPacket } from '../../services/discoverRecommendationCacheService';
+import { complementaryProductsForDisplay } from '../../src/intelligence/recommendations/complementaryProductsForDisplay';
 import { DEFAULT_SEARCH_BRANDS } from '../../lib/searchQueryParse';
+import type { WardrobeItemForCandidate } from '../../src/intelligence/outfits/outfitCandidate';
+import type { DiscoverRecommendation } from '../../src/intelligence/recommendations/discoverRecommendation';
 import { useAppStore } from '../../store/useAppStore';
 import { getProductImages, type Product } from '../../types/product';
 import type { FeedMode } from '../../types/recommendation';
 
 const TOAST_DURATION_MS = 1600;
 const FILTER_HIT_SIZE = 40;
-const SEARCH_DIVIDER_HEIGHT = 24;
 const SEARCH_TRACK_DEBOUNCE_MS = 500;
 /** Header, clip sınırında kesilen kartın üstünde kalır. */
 const HEADER_Z_INDEX = 7;
+const EMPTY_RECOMMENDATIONS: readonly DiscoverRecommendation[] = [];
 
 type HintStatus = 'checking' | 'visible' | 'hidden';
 
@@ -84,7 +98,7 @@ function LoadingFeed() {
       />
       <Text style={styles.loadingTitle}>Ürünler yükleniyor...</Text>
       <Text style={styles.emptySubtitle}>
-        Kabin feedi hazırlanıyor. Birazdan kaydırmaya başlayabilirsin.
+        Vitirify feedi hazırlanıyor. Birazdan kaydırmaya başlayabilirsin.
       </Text>
     </View>
   );
@@ -129,15 +143,29 @@ export default function FeedScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
-  const headerToDeckPx = headerToDeckForHeight(windowHeight);
   const discoverCardLiftPx = discoverCardLiftForHeight(windowHeight);
   const { user } = useAuthContext();
+  useFocusEffect(
+    useCallback(() => {
+      const statusBar = StatusBar.pushStackEntry({
+        barStyle: 'light-content',
+        backgroundColor: 'transparent',
+        translucent: true,
+      });
+      return () => StatusBar.popStackEntry(statusBar);
+    }, []),
+  );
   const currentProducts = useAppStore((state) => state.currentProducts);
   const feedStatus = useAppStore((state) => state.feedStatus);
+  const feedPreparationRevision = useAppStore((state) => state.feedPreparationRevision ?? 0);
+  const likedProducts = useAppStore((state) => state.likedProducts);
   const seenCount = useAppStore(
     (state) => state.likedProducts.length + state.passedProductIds.length,
   );
   const loadFeed = useAppStore((state) => state.loadFeed);
+  const loadMoreFeed = useAppStore((state) => state.loadMoreFeed);
+  const hasMore = useAppStore((state) => state.hasMore);
+  const isFetchingNext = useAppStore((state) => state.isFetchingNext);
   const setFeedMode = useAppStore((state) => state.setFeedMode);
   const feedMode = useAppStore((state) => state.feedMode);
   const feedFallback = useAppStore((state) => state.feedFallback);
@@ -150,11 +178,13 @@ export default function FeedScreen() {
     return stack[stack.length - 1] ?? null;
   });
 
-
   const estimatedH = estimateDiscoverCardHeight(windowHeight);
   const pageHeight = useSharedValue(estimatedH);
   const dragOffset = useSharedValue(0);
-  const topProductId = currentProducts[0]?.id ?? null;
+  const currentProduct = currentProducts[0] ?? null;
+  const nextProduct = currentProducts[1] ?? null;
+  const warmProduct = currentProducts[2] ?? null;
+  const topProductId = currentProduct?.id ?? null;
 
   const prevTopIdRef = useRef<string | null>(null);
   const pageIndexSVByIdRef = useRef(new Map<string, SharedValue<number>>());
@@ -182,9 +212,144 @@ export default function FeedScreen() {
 
   const userId = user?.id ?? null;
   const canLike = user !== null;
+  const [recommendationCatalog, setRecommendationCatalog] = useState<Product[]>(
+    [],
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      // The first ranked feed is critical; the optional recommendation pool is not.
+      if (feedStatus !== 'success') return;
+      let active = true;
+      void fetchRecommendationCatalog()
+        .then((products) => {
+          if (active) setRecommendationCatalog(products);
+        })
+        .catch((error) => {
+          logger.warn('Öneri kataloğu okunamadı', { error });
+          if (active) setRecommendationCatalog([]);
+        });
+      return () => {
+        active = false;
+      };
+    }, [feedStatus]),
+  );
+
+  const [wardrobeForRecommendations, setWardrobeForRecommendations] = useState<{
+    userId: string | null;
+    items: WardrobeItemForCandidate[];
+  }>({ userId: null, items: [] });
+  const missingWardrobeTable = useRef(false);
+  const clearWardrobeRecommendations = useCallback((owner: string | null) => {
+    setWardrobeForRecommendations(previous => previous.userId === owner && previous.items.length === 0
+      ? previous : { userId: owner, items: [] });
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      if (userId === null || missingWardrobeTable.current) {
+        clearWardrobeRecommendations(userId);
+        return () => {
+          active = false;
+        };
+      }
+
+      const client = getSupabaseClient();
+      if (client === null) {
+        clearWardrobeRecommendations(userId);
+        return () => {
+          active = false;
+        };
+      }
+
+      void (async () => {
+        try {
+          const { data, error } = await client
+            .from('wardrobe_items')
+            .select('*')
+            .eq('user_id', userId);
+          if (error) throw error;
+          const items = ((data ?? []) as unknown[]).filter(
+            (row): row is WardrobeItemForCandidate => {
+              if (typeof row !== 'object' || row === null) return false;
+              const item = row as Record<string, unknown>;
+              return (
+                typeof item.id === 'string' && typeof item.category === 'string'
+              );
+            },
+          );
+          if (active) setWardrobeForRecommendations({ userId, items });
+        } catch (error) {
+          if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'PGRST205') {
+            missingWardrobeTable.current = true;
+            logger.debug('Dolap backend tablosu API’de kullanılamıyor; öneriler katalogla devam ediyor');
+          } else {
+            logger.warn('Dolap parçaları öneriler için okunamadı', { error });
+          }
+          if (active) clearWardrobeRecommendations(userId);
+        }
+      })();
+      return () => {
+        active = false;
+      };
+    }, [userId, clearWardrobeRecommendations]),
+  );
+
+  const recommendationSession = useMemo(() => new DiscoverRecommendationCache(recommendationCatalog,
+    wardrobeForRecommendations.userId === userId ? wardrobeForRecommendations.items : [], userId),
+    [recommendationCatalog, userId, wardrobeForRecommendations]);
+  const [recommendationRevision, publishRecommendations] = useState(0);
+  const recommendationFocused = useRef(false);
+  const preparationInputs = useRef({ session: recommendationSession, products: currentProducts, feedStatus });
+  useLayoutEffect(() => {
+    preparationInputs.current = { session: recommendationSession, products: currentProducts, feedStatus };
+    if (recommendationFocused.current && currentProduct) recommendationSession.activate(currentProduct);
+  }, [recommendationSession, currentProducts, currentProduct, feedStatus, recommendationRevision]);
+  const prefetchedCovers = useRef(new Set<string>());
+  useFocusEffect(useCallback(() => {
+    recommendationFocused.current = true;
+    const controller = new AbortController();
+    const latest = preparationInputs.current;
+    if (feedStatus === 'success' && recommendationSession.catalog.length > 0 &&
+      (userId === null || wardrobeForRecommendations.userId === userId)) {
+      if (latest.products[0]) recommendationSession.activate(latest.products[0]);
+      const anchors = [...latest.products];
+      const request = recommendationSession.request(anchors, feedPreparationRevision);
+      void loadDiscoverRecommendationPacket(request, userId, controller.signal, packet => {
+        if (controller.signal.aborted || !recommendationFocused.current || preparationInputs.current.session !== recommendationSession) return;
+        if (!recommendationSession.accept(packet, anchors)) return;
+        const active = preparationInputs.current.products[0];
+        if (active) recommendationSession.activate(active);
+        publishRecommendations(revision => revision + 1);
+        const imageUrls = [...new Set(anchors.flatMap(product => complementaryProductsForDisplay(
+          recommendationSession.lookup(product) ?? EMPTY_RECOMMENDATIONS, product.id).flatMap(recommended => getProductImages(recommended).slice(0, 1))))]
+          .filter(url => !prefetchedCovers.current.has(url));
+        if (imageUrls.length > 0) {
+          imageUrls.forEach(url => prefetchedCovers.current.add(url));
+          void Image.prefetch(imageUrls, { cachePolicy: 'memory-disk' }).catch(() => {
+            imageUrls.forEach(url => prefetchedCovers.current.delete(url));
+          });
+        }
+      }).catch(error => { if (!controller.signal.aborted) logger.warn('Recommendation cache paketi okunamadı', { error }); });
+    }
+    return () => { recommendationFocused.current = false; controller.abort(); };
+    // Feed batches/context/focus own preparation. Anchor transitions and exposure
+    // revisions deliberately do not trigger requests or computation.
+  }, [recommendationSession, feedPreparationRevision, feedStatus, userId, wardrobeForRecommendations.userId]));
+
+  const selectedRecommendationProductIds = useMemo(
+    () => likedProducts.map(item => item.product.id), [likedProducts],
+  );
 
   const [feedQuery, setFeedQuery] = useState<FeedQuery>(EMPTY_FEED_QUERY);
   const [searchInput, setSearchInput] = useState('');
+  const [isSearchInputOpen, setIsSearchInputOpen] = useState(false);
+  const searchInputRef = useRef<TextInput>(null);
+  useEffect(() => {
+    if (isSearchInputOpen) searchInputRef.current?.focus();
+    else searchInputRef.current?.blur();
+  }, [isSearchInputOpen]);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const feedQueryRef = useRef(feedQuery);
   feedQueryRef.current = feedQuery;
@@ -248,21 +413,23 @@ export default function FeedScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  // Prefetch budget: current card all images (cap 6); next/warm only images[0].
-  useEffect(() => {
-    const urls: string[] = [];
-    const current = currentProducts[0];
-    if (current) {
-      urls.push(...getProductImages(current).slice(0, 6));
+  useFocusEffect(useCallback(() => {
+    if (feedStatus === 'success' && hasMore && !isFetchingNext && currentProducts.length <= 5) {
+      void loadMoreFeed();
     }
-    const next = currentProducts[1];
+  }, [currentProducts.length, feedStatus, hasMore, isFetchingNext, loadMoreFeed]));
+
+  // The visible card mounts its current/neighbor images itself; only warm the next covers.
+  useFocusEffect(useCallback(() => {
+    const urls: string[] = [];
+    const next = nextProduct;
     if (next) {
       const first = getProductImages(next)[0];
       if (first) {
         urls.push(first);
       }
     }
-    const warm = currentProducts[2];
+    const warm = warmProduct;
     if (warm) {
       const first = getProductImages(warm)[0];
       if (first) {
@@ -270,13 +437,19 @@ export default function FeedScreen() {
       }
     }
     const unique = Array.from(new Set(urls)).filter(
-      (url): url is string => typeof url === 'string' && url.length > 0,
+      (url): url is string => typeof url === 'string' && url.length > 0 && !prefetchedCovers.current.has(url),
     );
     if (unique.length === 0) {
       return;
     }
-    void Image.prefetch(unique);
-  }, [currentProducts]);
+    const handle = requestIdleCallback(() => {
+      const pending = unique.filter(url => !prefetchedCovers.current.has(url));
+      if (pending.length === 0) return;
+      pending.forEach(url => prefetchedCovers.current.add(url));
+      void Image.prefetch(pending).catch(() => pending.forEach(url => prefetchedCovers.current.delete(url)));
+    });
+    return () => cancelIdleCallback(handle);
+  }, [nextProduct, warmProduct]));
 
   const handleRequireAuth = useCallback((): void => {
     router.push('/profile');
@@ -360,7 +533,9 @@ export default function FeedScreen() {
         applyFeedQuery(EMPTY_FEED_QUERY, { inputText: '' });
         return;
       }
-      const parsed = parseSearchQuery(trimmed, { brands: DEFAULT_SEARCH_BRANDS });
+      const parsed = parseSearchQuery(trimmed, {
+        brands: DEFAULT_SEARCH_BRANDS,
+      });
       // Merge with panel-only facets that NL didn't set? Prefer NL as full replace
       // of searchable state so bar + panel stay one source after commit.
       const next = feedQueryFromFilters(parsed.filters);
@@ -523,12 +698,19 @@ export default function FeedScreen() {
       }
       dragOffset.value = nextDrag;
     })();
-  }, [topProductId, deckPoseKey, estimatedH, deckPages, dragOffset, pageHeight]);
+  }, [
+    topProductId,
+    deckPoseKey,
+    estimatedH,
+    deckPages,
+    dragOffset,
+    pageHeight,
+  ]);
 
   const hasDeck = currentProducts.length > 0;
   // Katalogda ürün var ama hepsi beğenildi/geçildi: tekrar yüklemek işe yaramaz.
-  const isCatalogExhausted = !hasDeck && seenCount > 0;
-  const isLoading = feedStatus === 'loading' || feedStatus === 'idle';
+  const isCatalogExhausted = !hasDeck && hasMore === false && seenCount > 0;
+  const isLoading = feedStatus === 'loading' || feedStatus === 'idle' || (!hasDeck && isFetchingNext);
   const isSearchMode = feedQuery.mode === 'search';
   const activeFilterCount = countActiveFilters(feedQuery.filters);
   const searchBannerText = useMemo(() => {
@@ -552,26 +734,56 @@ export default function FeedScreen() {
       style={[
         styles.container,
         {
-          paddingTop:
-            (insets.top > 0 ? insets.top : layout.statusBarFallback) +
-            layout.headerPaddingTop,
+          paddingTop: 0,
         },
       ]}
     >
       <View
         style={[
           styles.header,
-          { paddingBottom: headerToDeckPx },
+          {
+            paddingTop:
+              (insets.top > 0 ? insets.top : layout.statusBarFallback) +
+              layout.headerPaddingTop,
+          },
         ]}
       >
-        <View style={styles.searchBar}>
-          <Search color={colors.icon} size={18} />
+        <View style={styles.segmentWrap}>
+          <FeedModeSegment
+            value={feedMode}
+            onChange={handleFeedModeChange}
+            overlay
+        />
+        <View style={styles.headerActions}>
+          <PressableScale
+            onPress={() => {
+              setIsSearchInputOpen(open => !open);
+            }}
+            style={styles.filterHit}
+            accessibilityRole="button"
+            accessibilityLabel="Aramayı aç"
+            accessibilityState={{ expanded: isSearchInputOpen }}
+          >
+            <Search color={colors.inverseText} size={24} />
+          </PressableScale>
+          <PressableScale
+            onPress={() => setIsFilterOpen(true)}
+            style={styles.filterHit}
+            accessibilityRole="button"
+            accessibilityLabel="Filtreler"
+          >
+            <SlidersHorizontal color={colors.inverseText} size={21} />
+            {activeFilterCount > 0 ? <View style={styles.filterDot} /> : null}
+          </PressableScale>
+        </View>
+        <View style={[styles.searchBar, !isSearchInputOpen && styles.searchClosed]} pointerEvents={isSearchInputOpen ? 'auto' : 'none'}>
           <TextInput
+            ref={searchInputRef}
             value={searchInput}
             onChangeText={handleSearchChange}
             onSubmitEditing={() => commitSearchText(searchInput)}
             placeholder="Ne arıyorsun?"
-            placeholderTextColor={colors.placeholder}
+            placeholderTextColor={colors.inverseText}
             style={styles.searchInput}
             autoCorrect={false}
             autoCapitalize="none"
@@ -585,19 +797,10 @@ export default function FeedScreen() {
               accessibilityRole="button"
               accessibilityLabel="Aramayı temizle"
             >
-              <X color={colors.icon} size={16} />
+              <X color={colors.inverseText} size={16} />
             </PressableScale>
           ) : null}
-          <View style={styles.searchDivider} />
-          <PressableScale
-            onPress={() => setIsFilterOpen(true)}
-            style={styles.filterHit}
-            accessibilityRole="button"
-            accessibilityLabel="Filtreler"
-          >
-            <SlidersHorizontal color={colors.icon} size={18} />
-            {activeFilterCount > 0 ? <View style={styles.filterDot} /> : null}
-          </PressableScale>
+        </View>
         </View>
         {isSearchMode && showSearchBanner && searchBannerText ? (
           <View style={styles.searchMetaBlock}>
@@ -606,14 +809,16 @@ export default function FeedScreen() {
             </View>
           </View>
         ) : null}
-        <View style={styles.segmentWrap}>
-          <FeedModeSegment value={feedMode} onChange={handleFeedModeChange} />
-        </View>
       </View>
       <View
         style={[
           styles.body,
-          { paddingBottom: layout.deckPadding + discoverCardLiftPx },
+          {
+            paddingBottom:
+              !isLoading && hasDeck
+                ? 0
+                : layout.deckPadding + discoverCardLiftPx,
+          },
         ]}
       >
         {isLoading ? (
@@ -659,16 +864,16 @@ export default function FeedScreen() {
                   onUndoPass={handleUndoPass}
                   onRequireAuth={handleRequireAuth}
                   onImpression={handleImpression}
+                  recommendations={recommendationSession.lookup(product) ?? EMPTY_RECOMMENDATIONS}
+                  selectedRecommendationProductIds={selectedRecommendationProductIds}
+                  onSelectRecommendation={canLike ? handleSwipeRight : handleRequireAuth}
                 />
               ))}
             </View>
           </View>
         )}
       </View>
-      {hintStatus === 'visible' &&
-      !isLoading &&
-      !isSearchMode &&
-      hasDeck ? (
+      {hintStatus === 'visible' && !isLoading && !isSearchMode && hasDeck ? (
         <SwipeHintOverlay onDismiss={handleDismissHint} />
       ) : null}
       <FilterSheet
@@ -712,38 +917,48 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   header: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
     paddingHorizontal: spacing.lg,
-    backgroundColor: colors.bg,
     zIndex: HEADER_Z_INDEX,
   },
   searchBar: {
-    width: '100%',
-    height: layout.headerControl,
+    position: 'absolute',
+    right: FILTER_HIT_SIZE * 2 + spacing.sm + spacing.xs,
+    top: (FILTER_HIT_SIZE - 36) / 2,
+    width: '30%',
+    maxWidth: 120,
+    height: 36,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    backgroundColor: colors.input,
-    borderRadius: radius.card,
-    paddingLeft: spacing.md,
-    paddingRight: spacing.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.inverseText,
     marginBottom: 0,
     zIndex: 6,
-    ...shadows.input,
   },
   segmentWrap: {
-    marginTop: layout.searchToSegment,
     alignItems: 'flex-start',
+  },
+  headerActions: {
+    position: 'absolute',
+    right: 0,
+    top: (layout.segmentHeight - FILTER_HIT_SIZE) / 2,
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  searchClosed: {
+    height: 0,
+    opacity: 0,
+    overflow: 'hidden',
   },
   searchInput: {
     flex: 1,
-    color: colors.text,
-    fontSize: 15,
+    color: colors.inverseText,
+    fontSize: 14,
     paddingVertical: 0,
-  },
-  searchDivider: {
-    width: 1,
-    height: SEARCH_DIVIDER_HEIGHT,
-    backgroundColor: colors.border,
   },
   filterHit: {
     width: FILTER_HIT_SIZE,
@@ -763,8 +978,7 @@ const styles = StyleSheet.create({
   body: {
     flex: 1,
     width: '100%',
-    paddingHorizontal: spacing.lg,
-    justifyContent: 'center',
+    justifyContent: 'flex-start',
   },
   clearHit: {
     width: 28,
@@ -794,15 +1008,13 @@ const styles = StyleSheet.create({
   deckClip: {
     flex: 1,
     overflow: 'hidden',
-    marginHorizontal: -spacing.lg,
-    paddingHorizontal: spacing.lg,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.bg,
   },
   deck: {
     flex: 1,
     width: '100%',
     overflow: 'hidden',
-    backgroundColor: colors.surface,
+    backgroundColor: colors.bg,
   },
   emptyState: {
     alignItems: 'center',

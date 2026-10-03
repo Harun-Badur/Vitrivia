@@ -11,6 +11,12 @@ module.exports = tseslint.config(
       'android/**',
       'ios/**',
       'coverage/**',
+      'build/**',
+      'output/**',
+      'tmp/**',
+      '**/.venv/**',
+      '**/.models/**',
+      '**/.logs/**',
       'supabase/functions/**',
       'scripts/**',
       'babel.config.js',
@@ -21,6 +27,10 @@ module.exports = tseslint.config(
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  {
+    files: ['__tests__/*.jest.cjs'],
+    languageOptions: { globals: { module: 'readonly' } },
+  },
   {
     files: ['**/*.{ts,tsx}'],
     plugins: {

@@ -5,7 +5,7 @@ import type {
   PriceRange,
   UserPreferences,
 } from '../types/recommendation';
-import type { GarmentCategory } from '../types/product';
+import { isGarmentCategory, type GarmentCategory } from '../types/product';
 
 interface PreferenceSignal {
   category: GarmentCategory;
@@ -13,14 +13,19 @@ interface PreferenceSignal {
   price: number;
 }
 
-const isGarmentCategory = (value: unknown): value is GarmentCategory =>
-  value === 'upper_body' || value === 'lower_body' || value === 'dresses';
-
 const normalizeBrand = (brand: string): string =>
   brand.trim().toLocaleLowerCase('tr');
 
 const createEmptyPreferences = (): UserPreferences => ({
-  categoryCounts: { upper_body: 0, lower_body: 0, dresses: 0 },
+  categoryCounts: {
+    upper_body: 0,
+    lower_body: 0,
+    dresses: 0,
+    shoes: 0,
+    bags: 0,
+    hats: 0,
+    accessories: 0,
+  },
   brandCounts: {},
   priceRange: null,
   passedProductIds: new Set<string>(),

@@ -1,6 +1,14 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   ActivityIndicator,
+  Modal,
   Dimensions,
   type LayoutChangeEvent,
   StyleSheet,
@@ -21,8 +29,18 @@ import Animated, {
   withTiming,
   type SharedValue,
 } from 'react-native-reanimated';
-import { Heart, ShoppingBag, Sparkles } from 'lucide-react-native';
+import {
+  ChevronRight,
+  Heart,
+  Maximize,
+  ShoppingBag,
+  Sparkles,
+  X,
+} from 'lucide-react-native';
 import PressableScale from './PressableScale';
+import DiscoverProductImage from './DiscoverProductImage';
+import DiscoverRecommendations from './DiscoverRecommendations';
+import type { DiscoverRecommendation } from '../src/intelligence/recommendations/discoverRecommendation';
 import { logger } from '../lib/logger';
 import {
   CARD_SPRING_BACK,
@@ -36,14 +54,12 @@ import { IMPRESSION_MIN_DWELL_MS } from '../types/analytics';
 import {
   colors,
   estimateDiscoverCardHeight,
-  layout,
   radius,
   shadows,
   spacing,
 } from '../lib/theme';
 import {
   formatTryPrice,
-  GARMENT_CATEGORY_LABEL,
   getDisplayPrice,
   getDropPercent,
   getProductImages,
@@ -60,7 +76,6 @@ const HEART_BURST_OUT_MS = 260;
 const HEART_BURST_PEAK_SCALE = 1.18;
 /** Soft crossfade when bitmap arrives; pairs with surface placeholder (no white flash). */
 const IMAGE_CROSSFADE_MS = 0;
-const IMAGE_PREFETCH_CAP = 6;
 const ACTION_ICON_SIZE = 16;
 const REASON_ICON_SIZE = 12;
 /** Horizontal gallery: activate after 6px X; fail if 12px Y first (card vertical wins). */
@@ -73,14 +88,12 @@ const IMAGE_COMMIT_VELOCITY_X = 500;
 const IMAGE_COMMIT_DISTANCE_RATIO = 0.25;
 /** Snap settle — withTiming 180ms (not spring). */
 const IMAGE_SNAP_DURATION_MS = 180;
-const IMAGE_DOT_SIZE = 7;
-const IMAGE_DOT_GAP = 6;
+const IMAGE_DOT_SIZE = 6;
+const IMAGE_DOT_GAP = 5;
 const IMAGE_DOT_TRANSITION_MS = 120;
-/** object-position: top-center — tam boy kadraj (hedef oran ~0.68). */
-const IMAGE_CONTENT_POSITION = { top: 0, left: '50%' } as const;
 
 /** Ekran kökünün 16px yatay padding’iyle aynı grid; ekstra inset yok. */
-const CARD_WIDTH = SCREEN_WIDTH - spacing.lg * 2;
+const CARD_WIDTH = SCREEN_WIDTH;
 const CARD_HEIGHT = estimateDiscoverCardHeight(SCREEN_HEIGHT);
 
 /** Persists gallery index across unmount so undo restores the same image. */
@@ -110,10 +123,15 @@ export interface SwipeCardProps {
   onImpression: (product: Product, dwellMs: number) => void;
   canLike?: boolean;
   canUndo?: boolean;
+  /** Presentation only; horizontal gallery navigation stays enabled. */
+  showGalleryIndicators?: boolean;
   /** Parent registry fill (render-time) for atomic pose batch. */
   registerPageIndexSV?: (productId: string, sv: SharedValue<number>) => void;
   /** Parent registry delete on unmount. */
   unregisterPageIndexSV?: (productId: string) => void;
+  recommendations?: readonly DiscoverRecommendation[];
+  selectedRecommendationProductIds?: readonly string[];
+  onSelectRecommendation?: (product: Product) => void;
 }
 
 const formatPrice = (product: Product): string =>
@@ -123,21 +141,22 @@ function GalleryDot({ active }: { active: boolean }) {
   const progress = useSharedValue(active ? 1 : 0);
 
   useEffect(() => {
-    progress.value = withTiming(active ? 1 : 0, { duration: IMAGE_DOT_TRANSITION_MS });
+    progress.value = withTiming(active ? 1 : 0, {
+      duration: IMAGE_DOT_TRANSITION_MS,
+    });
   }, [active, progress]);
 
   const animatedStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(progress.value, [0, 1], [0.5, 1]),
+    opacity: interpolate(progress.value, [0, 1], [0.4, 0.9]),
     transform: [
       {
-        scale: interpolate(progress.value, [0, 1], [1, 1.2]),
+        scale: interpolate(progress.value, [0, 1], [1, 1.1]),
       },
     ],
   }));
 
   return <Animated.View style={[styles.galleryDot, animatedStyle]} />;
 }
-
 
 function SwipeCard({
   product,
@@ -153,10 +172,13 @@ function SwipeCard({
   onImpression,
   canLike = true,
   canUndo = false,
+  showGalleryIndicators = true,
   registerPageIndexSV,
   unregisterPageIndexSV,
+  recommendations,
+  selectedRecommendationProductIds,
+  onSelectRecommendation,
 }: SwipeCardProps) {
-
   const isCurrent = pageIndex === 0;
   /** Pose slot index — parent atomically writes on deck remap; do not sync from React. */
   const pageIndexSV = useSharedValue<number>(pageIndex);
@@ -200,8 +222,7 @@ function SwipeCard({
     galleryX.value = -next * pageWidthSV.value;
   }, [product.id, images, galleryX, imageCountSV, imageIndexSV, pageWidthSV]);
 
-  const selectedImageUrl =
-    images[imageIndex] ?? product.imageUrl;
+  const selectedImageUrl = images[imageIndex] ?? product.imageUrl;
 
   useEffect(() => {
     let cancelled = false;
@@ -219,14 +240,6 @@ function SwipeCard({
       cancelled = true;
     };
   }, [product.id, selectedImageUrl]);
-
-  // Current card: prefetch gallery (cap 6). Next/warm handled by Discover parent (images[0] only).
-  useEffect(() => {
-    if (pageIndex !== 0 || images.length === 0) {
-      return;
-    }
-    void Image.prefetch(images.slice(0, IMAGE_PREFETCH_CAP));
-  }, [pageIndex, product.id, images]);
 
   useEffect(() => {
     const id = product.id;
@@ -306,16 +319,6 @@ function SwipeCard({
     }
   }, [images, imageIndex, onVirtualTryOn, product]);
 
-  const prefetchNeighbor = useCallback(
-    (index: number): void => {
-      const url = images[index];
-      if (typeof url === 'string' && url.length > 0) {
-        void Image.prefetch(url);
-      }
-    },
-    [images],
-  );
-
   const commitImageIndex = useCallback(
     (nextIndex: number): void => {
       if (nextIndex < 0 || nextIndex >= images.length) {
@@ -323,11 +326,8 @@ function SwipeCard({
       }
       setImageIndex(nextIndex);
       imageIndexByProductId.set(product.id, nextIndex);
-      // Lazy prefetch ±1 from the new index.
-      prefetchNeighbor(nextIndex - 1);
-      prefetchNeighbor(nextIndex + 1);
     },
-    [images.length, prefetchNeighbor, product.id],
+    [images.length, product.id],
   );
 
   const handleImagePagerLayout = useCallback(
@@ -493,7 +493,10 @@ function SwipeCard({
   const imagePanGesture = Gesture.Pan()
     .enabled(isCurrent && imageCount > 1)
     .minPointers(1)
-    .activeOffsetX([-IMAGE_SWIPE_ACTIVE_OFFSET_X_PX, IMAGE_SWIPE_ACTIVE_OFFSET_X_PX])
+    .activeOffsetX([
+      -IMAGE_SWIPE_ACTIVE_OFFSET_X_PX,
+      IMAGE_SWIPE_ACTIVE_OFFSET_X_PX,
+    ])
     .failOffsetY([-IMAGE_SWIPE_FAIL_OFFSET_Y_PX, IMAGE_SWIPE_FAIL_OFFSET_Y_PX])
     .onUpdate((event) => {
       const width = pageWidthSV.value;
@@ -527,7 +530,9 @@ function SwipeCard({
         Math.abs(tx) > width * IMAGE_COMMIT_DISTANCE_RATIO
       ) {
         const direction =
-          Math.abs(vx) > IMAGE_COMMIT_VELOCITY_X ? Math.sign(vx) : Math.sign(tx);
+          Math.abs(vx) > IMAGE_COMMIT_VELOCITY_X
+            ? Math.sign(vx)
+            : Math.sign(tx);
         // Finger left (neg) → next image; finger right (pos) → previous.
         if (direction < 0) {
           next = Math.min(count - 1, idx + 1);
@@ -538,7 +543,9 @@ function SwipeCard({
       // Dot/index commit on same tick as snap decision (before animation ends).
       imageIndexSV.value = next;
       runOnJS(commitImageIndex)(next);
-      galleryX.value = withTiming(-next * width, { duration: IMAGE_SNAP_DURATION_MS });
+      galleryX.value = withTiming(-next * width, {
+        duration: IMAGE_SNAP_DURATION_MS,
+      });
     });
 
   const animatedCardStyle = useAnimatedStyle(() => {
@@ -594,20 +601,18 @@ function SwipeCard({
   }, []);
 
   const reasonLabel = product.reason?.trim() ?? '';
+  const [isExpanded, setIsExpanded] = useState(false);
 
   return (
     <Animated.View
       pointerEvents={isCurrent ? 'auto' : 'none'}
       collapsable={false}
-      style={[
-        styles.slot,
-        slotTranslateStyle,
-        animatedCardStyle,
-      ]}
+      style={[styles.slot, slotTranslateStyle, animatedCardStyle]}
     >
       <GestureDetector gesture={cardGesture}>
         <Animated.View
-          style={[styles.shadowWrap, styles.shadowWrapFront]}
+          style={[styles.shadowWrap, styles.shadowWrapFront,
+            recommendations !== undefined && styles.pageContent]}
           accessibilityRole="image"
           accessibilityLabel={`${product.brand} ${product.title}, ${formatPrice(product)}`}
         >
@@ -615,7 +620,9 @@ function SwipeCard({
             <View style={styles.imageWrap} onLayout={handleImagePagerLayout}>
               {hasImageError ? (
                 <View style={styles.imageFallback}>
-                  <Text style={styles.imageFallbackText}>Görsel yüklenemedi</Text>
+                  <Text style={styles.imageFallbackText}>
+                    Görsel yüklenemedi
+                  </Text>
                 </View>
               ) : showGalleryPager ? (
                 <GestureDetector gesture={imagePanGesture}>
@@ -623,7 +630,7 @@ function SwipeCard({
                     style={styles.imagePager}
                     collapsable={false}
                     accessibilityRole="image"
-                    accessibilityLabel={`Ürün görselleri, ${imageIndex + 1}/${imageCount}`}
+                    accessibilityLabel="Ürün görselleri"
                   >
                     <Animated.View
                       style={[
@@ -633,39 +640,54 @@ function SwipeCard({
                       ]}
                     >
                       {images.map((uri, index) => (
-                        <Image
+                        <View
                           key={`${product.id}:${index}`}
-                          source={{ uri }}
                           style={[styles.imagePage, { width: pagerWidth }]}
-                          contentFit="cover"
-                          contentPosition={IMAGE_CONTENT_POSITION}
-                          cachePolicy="memory-disk"
-                          recyclingKey={`${product.id}:${index}`}
-                          transition={IMAGE_CROSSFADE_MS}
-                          priority={
-                            pageIndex === 0 || pageIndex === 1 || pageIndex === 2
-                              ? 'high'
-                              : 'low'
-                          }
-                          onLoadStart={
-                            index === imageIndex ? handleImageLoadStart : undefined
-                          }
-                          onLoad={index === imageIndex ? handleImageLoad : undefined}
-                        />
+                        >
+                          {(index === imageIndex || (pageIndex === 0 && Math.abs(index - imageIndex) <= 1)) && <DiscoverProductImage
+                            uri={uri}
+                            slot="main"
+                            style={styles.image}
+                            cachePolicy="memory-disk"
+                            recyclingKey={`${product.id}:${index}`}
+                            transition={IMAGE_CROSSFADE_MS}
+                            priority={
+                              pageIndex === 0
+                                ? 'high'
+                                : 'low'
+                            }
+                            onLoadStart={
+                              index === imageIndex
+                                ? handleImageLoadStart
+                                : undefined
+                            }
+                            onLoad={
+                              index === imageIndex ? handleImageLoad : undefined
+                            }
+                            onError={
+                              index === imageIndex
+                                ? handleImageError
+                                : undefined
+                            }
+                          />}
+                        </View>
                       ))}
                     </Animated.View>
                   </Animated.View>
                 </GestureDetector>
               ) : (
-                <Image
-                  source={imageSource}
+                <DiscoverProductImage
+                  uri={selectedImageUrl}
+                  slot="main"
                   style={styles.image}
-                  contentFit="cover"
-                  contentPosition={IMAGE_CONTENT_POSITION}
                   cachePolicy="memory-disk"
                   recyclingKey={`${product.id}:${imageIndex}`}
                   transition={IMAGE_CROSSFADE_MS}
-                  priority={pageIndex === 0 || pageIndex === 1 || pageIndex === 2 ? 'high' : 'low'}
+                  priority={
+                    pageIndex === 0 || pageIndex === 1 || pageIndex === 2
+                      ? 'high'
+                      : 'low'
+                  }
                   onLoadStart={handleImageLoadStart}
                   onLoad={handleImageLoad}
                   onError={handleImageError}
@@ -678,14 +700,16 @@ function SwipeCard({
                 </View>
               ) : null}
 
-              {showGalleryPager ? (
+              {showGalleryPager && showGalleryIndicators ? (
                 <View style={styles.dotsRow} pointerEvents="none">
-                  {images.map((_, index) => (
-                    <GalleryDot
-                      key={`${product.id}:dot:${index}`}
-                      active={index === imageIndex}
-                    />
-                  ))}
+                  <View style={styles.dotsPill}>
+                    {images.map((_, index) => (
+                      <GalleryDot
+                        key={`${product.id}:dot:${index}`}
+                        active={index === imageIndex}
+                      />
+                    ))}
+                  </View>
                 </View>
               ) : null}
 
@@ -705,106 +729,126 @@ function SwipeCard({
                 </View>
               ) : null}
 
-              {isCurrent && !canLike ? (
-                <PressableScale
-                  onPress={handleRequireAuth}
-                  style={styles.authButton}
-                  accessibilityRole="button"
-                  accessibilityLabel="Beğenmek için giriş yap"
-                >
-                  <Heart color={colors.accent} size={ACTION_ICON_SIZE} />
-                  <Text style={styles.authButtonText}>
-                    Beğenmek için giriş yap
-                  </Text>
-                </PressableScale>
-              ) : null}
+              <PressableScale
+                onPress={() => setIsExpanded(true)}
+                style={styles.expandButton}
+                accessibilityRole="button"
+                accessibilityLabel="Ürün görselini genişlet"
+              >
+                <Maximize color={colors.inverseText} size={22} />
+              </PressableScale>
             </View>
 
             <View style={styles.info}>
-              <View style={styles.categoryBadge}>
-                <Text style={styles.categoryBadgeText}>
-                  {GARMENT_CATEGORY_LABEL[product.category]}
+              <View style={styles.metaRow}>
+                <Text style={styles.brand} numberOfLines={1}>
+                  {product.brand}
                 </Text>
+                <ChevronRight size={16} color={colors.textSecondary} />
               </View>
-              <Text style={styles.brand} numberOfLines={1}>
-                {product.brand}
-              </Text>
-              <Text style={styles.title} numberOfLines={2}>
+              <Text style={styles.title} numberOfLines={1}>
                 {product.title}
               </Text>
-              {(product.colors && product.colors.length > 0) ||
-              (product.sizes && product.sizes.length > 0) ? (
-                <View style={styles.variationRow}>
-                  {product.colors && product.colors.length > 0
-                    ? product.colors.slice(0, 4).map((swatch) => (
-                        <View
-                          key={`${swatch.name}-${swatch.hex}`}
-                          style={[
-                            styles.swatch,
-                            { backgroundColor: swatch.hex },
-                          ]}
-                        />
-                      ))
-                    : null}
-                  {product.sizes && product.sizes.length > 0 ? (
-                    <Text style={styles.sizeHint}>
-                      {`· ${product.sizes.length} beden`}
+              <View style={styles.purchaseRow}>
+                <View style={styles.priceRow}>
+                  {hasCatalogPriceDrop(product) &&
+                  typeof product.previousPrice === 'number' ? (
+                    <Text style={styles.previousPrice}>
+                      {formatTryPrice(product.previousPrice)}
                     </Text>
                   ) : null}
+                  <Text style={styles.price}>{formatPrice(product)}</Text>
+                  {hasCatalogPriceDrop(product) &&
+                  typeof product.previousPrice === 'number' ? (
+                    <View style={styles.dropBadge}>
+                      <Text style={styles.dropBadgeText}>
+                        {`↓ %${getDropPercent(product.previousPrice, getDisplayPrice(product))}`}
+                      </Text>
+                    </View>
+                  ) : null}
                 </View>
-              ) : null}
-              <View style={styles.priceRow}>
-                {hasCatalogPriceDrop(product) &&
-                typeof product.previousPrice === 'number' ? (
-                  <Text style={styles.previousPrice}>
-                    {formatTryPrice(product.previousPrice)}
-                  </Text>
-                ) : null}
-                <Text style={styles.price}>{formatPrice(product)}</Text>
-                {hasCatalogPriceDrop(product) &&
-                typeof product.previousPrice === 'number' ? (
-                  <View style={styles.dropBadge}>
-                    <Text style={styles.dropBadgeText}>
-                      {`↓ %${getDropPercent(product.previousPrice, getDisplayPrice(product))}`}
-                    </Text>
-                  </View>
-                ) : null}
-              </View>
 
-              {/* CTA her zaman mount — page flip CTA unmount etmez. */}
-              <GestureDetector gesture={ctaNativeGesture}>
-                <View
-                  style={styles.actions}
-                  collapsable={false}
-                  pointerEvents={isCurrent ? 'auto' : 'none'}
-                >
-                  <PressableScale
-                    onPress={handleVirtualTryOn}
-                    style={styles.primaryAction}
-                    accessibilityRole="button"
-                    accessibilityLabel="Dene"
+                {/* CTA her zaman mount — page flip CTA unmount etmez. */}
+                <GestureDetector gesture={ctaNativeGesture}>
+                  <View
+                    style={styles.actions}
+                    collapsable={false}
+                    pointerEvents={isCurrent ? 'auto' : 'none'}
                   >
-                    <Sparkles
-                      color={colors.inverseText}
-                      size={ACTION_ICON_SIZE}
-                    />
-                    <Text style={styles.primaryActionText}>Dene</Text>
-                  </PressableScale>
-                  <PressableScale
-                    onPress={handleStorePress}
-                    style={styles.secondaryAction}
-                    accessibilityRole="button"
-                    accessibilityLabel="Mağazaya git"
-                  >
-                    <ShoppingBag color={colors.text} size={ACTION_ICON_SIZE} />
-                    <Text style={styles.secondaryActionText}>Mağazaya Git</Text>
-                  </PressableScale>
-                </View>
-              </GestureDetector>
+                    <PressableScale
+                      onPress={handleVirtualTryOn}
+                      style={styles.primaryAction}
+                      accessibilityRole="button"
+                      accessibilityLabel="Dene"
+                    >
+                      <Sparkles
+                        color={colors.inverseText}
+                        size={ACTION_ICON_SIZE}
+                      />
+                      <Text
+                        style={styles.primaryActionText}
+                        numberOfLines={1}
+                        adjustsFontSizeToFit
+                      >
+                        Dene
+                      </Text>
+                    </PressableScale>
+                    <PressableScale
+                      onPress={handleStorePress}
+                      style={styles.secondaryAction}
+                      accessibilityRole="button"
+                      accessibilityLabel="Mağazaya git"
+                    >
+                      <ShoppingBag
+                        color={colors.text}
+                        size={ACTION_ICON_SIZE}
+                      />
+                      <Text
+                        style={styles.secondaryActionText}
+                        numberOfLines={1}
+                        adjustsFontSizeToFit
+                      >
+                        Mağazaya Git
+                      </Text>
+                    </PressableScale>
+                  </View>
+                </GestureDetector>
+              </View>
             </View>
           </View>
         </Animated.View>
       </GestureDetector>
+      {recommendations !== undefined ? (
+        <DiscoverRecommendations
+          currentProductId={product.id}
+          recommendations={recommendations}
+          selectedProductIds={selectedRecommendationProductIds}
+          onSelectProduct={onSelectRecommendation}
+        />
+      ) : null}
+      <Modal
+        visible={isCurrent && isExpanded}
+        animationType="fade"
+        onRequestClose={() => setIsExpanded(false)}
+      >
+        <View style={styles.expandedSurface}>
+          <Image
+            source={imageSource}
+            style={styles.image}
+            contentFit="contain"
+            cachePolicy="memory-disk"
+            accessibilityLabel={product.title}
+          />
+          <PressableScale
+            onPress={() => setIsExpanded(false)}
+            style={styles.closeExpanded}
+            accessibilityRole="button"
+            accessibilityLabel="Genişletilmiş görseli kapat"
+          >
+            <X size={24} color={colors.inverseText} />
+          </PressableScale>
+        </View>
+      </Modal>
     </Animated.View>
   );
 }
@@ -815,30 +859,56 @@ export const SWIPE_CARD_WIDTH = CARD_WIDTH;
 export const SWIPE_CARD_HEIGHT = CARD_HEIGHT;
 
 const styles = StyleSheet.create({
+  expandButton: {
+    position: 'absolute',
+    right: 16,
+    bottom: 30,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.inverseSurface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  expandedSurface: { flex: 1, backgroundColor: colors.backdrop },
+  closeExpanded: {
+    position: 'absolute',
+    right: 16,
+    top: 56,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.inverseSurface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   slot: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   shadowWrap: {
     width: '100%',
     height: '100%',
-    borderRadius: radius.card,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.bg,
   },
   shadowWrapFront: {
     elevation: 0,
   },
+  pageContent: {
+    flex: 1,
+    height: 'auto',
+  },
   card: {
     flex: 1,
-    borderRadius: radius.card,
-    borderWidth: 1,
-    borderColor: colors.border,
     overflow: 'hidden',
-    backgroundColor: colors.surface,
+    backgroundColor: colors.bg,
   },
   imageWrap: {
     flex: 1,
     width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: colors.surface,
+    overflow: 'hidden',
   },
   image: {
     width: '100%',
@@ -856,7 +926,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   imageLoading: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -871,33 +941,44 @@ const styles = StyleSheet.create({
   },
   imagePage: {
     height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
   },
   dotsRow: {
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: spacing.md,
+    bottom: 24,
     zIndex: 3,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  dotsPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: IMAGE_DOT_GAP,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 2,
+    borderRadius: radius.chip,
+    backgroundColor: 'transparent',
   },
   galleryDot: {
     width: IMAGE_DOT_SIZE,
     height: IMAGE_DOT_SIZE,
     borderRadius: IMAGE_DOT_SIZE / 2,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: colors.input,
   },
   heartBurst: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
   },
   reasonChip: {
     position: 'absolute',
-    left: spacing.md,
-    bottom: spacing.md,
+    left: spacing.lg,
+    bottom: 30,
     maxWidth: '82%',
     flexDirection: 'row',
     alignItems: 'center',
@@ -938,22 +1019,35 @@ const styles = StyleSheet.create({
   },
   info: {
     flexShrink: 0,
-    backgroundColor: colors.surface,
-    borderTopWidth: 1,
-    borderTopColor: colors.hairline,
+    backgroundColor: colors.input,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    marginTop: -14,
     paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.md,
+    paddingTop: 10,
+    paddingBottom: 6,
+  },
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  identityRow: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  metaDivider: {
+    width: 1,
+    height: 12,
+    backgroundColor: colors.border,
   },
   categoryBadge: {
-    alignSelf: 'flex-start',
-    backgroundColor: colors.bgSoft,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
+    paddingVertical: 1,
     borderRadius: radius.chip,
-    marginBottom: spacing.sm,
   },
   categoryBadgeText: {
     color: colors.textSecondary,
@@ -963,25 +1057,24 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   brand: {
+    flexShrink: 1,
     color: colors.textSecondary,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
-    letterSpacing: 1.4,
+    letterSpacing: 0.6,
     textTransform: 'uppercase',
-    marginBottom: 2,
   },
   title: {
     color: colors.text,
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
-    lineHeight: 24,
+    lineHeight: 20,
     marginBottom: spacing.xs,
   },
   variationRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    marginBottom: spacing.sm,
+    gap: spacing.xs,
   },
   swatch: {
     width: 12,
@@ -992,41 +1085,50 @@ const styles = StyleSheet.create({
   },
   sizeHint: {
     color: colors.textSecondary,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
   },
-  priceRow: {
+  purchaseRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    columnGap: 10,
+    rowGap: 6,
+  },
+  priceRow: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
     flexWrap: 'wrap',
   },
   previousPrice: {
     color: colors.textSecondary,
-    fontSize: 14,
+    fontSize: 10,
     fontWeight: '600',
     textDecorationLine: 'line-through',
   },
   price: {
     color: colors.text,
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
   },
   dropBadge: {
     backgroundColor: colors.accentSoft,
     borderRadius: radius.chip,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.xs,
     paddingVertical: 3,
   },
   dropBadgeText: {
     color: colors.accentDark,
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '800',
   },
   actions: {
+    flex: 1,
+    minWidth: 0,
     flexDirection: 'row',
     gap: spacing.sm,
-    marginTop: spacing.sm,
   },
   primaryAction: {
     flex: 1,
@@ -1035,12 +1137,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: spacing.sm,
     backgroundColor: colors.accent,
-    borderRadius: radius.button,
-    paddingVertical: layout.ctaPaddingVertical,
+    minHeight: 32,
+    borderRadius: 8,
+    paddingVertical: 6,
   },
   primaryActionText: {
+    flexShrink: 1,
     color: colors.inverseText,
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '800',
   },
   secondaryAction: {
@@ -1049,15 +1153,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.sm,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.input,
+    minHeight: 32,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.button,
-    paddingVertical: layout.ctaPaddingVertical,
+    borderRadius: 8,
+    paddingVertical: 6,
   },
   secondaryActionText: {
+    flexShrink: 1,
     color: colors.text,
-    fontSize: 14,
+    fontSize: 10,
     fontWeight: '700',
   },
 });

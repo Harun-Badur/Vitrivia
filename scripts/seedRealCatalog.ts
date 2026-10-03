@@ -9,9 +9,11 @@ import {
 import type { FeedProvider } from '../types/product';
 import type { GarmentCategory } from '../types/product';
 
+type SeedCategory = Extract<GarmentCategory, 'upper_body' | 'lower_body' | 'dresses'>;
+
 loadEnv();
 
-const IMAGE_FALLBACK: Record<GarmentCategory, string> = {
+const IMAGE_FALLBACK: Record<SeedCategory, string> = {
   upper_body:
     'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=800',
   lower_body:
@@ -25,7 +27,7 @@ interface CatalogInput {
   brand: string;
   title: string;
   rawUrl: string;
-  category: GarmentCategory;
+  category: SeedCategory;
   price: number;
 }
 
@@ -40,7 +42,7 @@ interface CatalogRow {
   image_url: string;
   images: string[];
   product_url: string;
-  category: GarmentCategory;
+  category: SeedCategory;
   affiliate_url: null;
   garment_description: string;
   imageSource: ProductImageSource;

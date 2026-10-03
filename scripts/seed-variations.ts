@@ -7,7 +7,7 @@
  */
 import { config as loadEnv } from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
-import type { GarmentCategory } from '../types/product';
+import { isGarmentCategory, type GarmentCategory } from '../types/product';
 
 loadEnv();
 
@@ -42,7 +42,7 @@ const COLOR_KEYWORDS: ColorKeyword[] = [
   { name: 'Pembe', hex: '#EC4899', keys: ['pembe', 'pink'] },
 ];
 
-const SIZES_BY_CATEGORY: Record<GarmentCategory, string[]> = {
+const SIZES_BY_CATEGORY: Partial<Record<GarmentCategory, string[]>> = {
   upper_body: ['XS', 'S', 'M', 'L', 'XL', 'XXL'],
   lower_body: ['XS', 'S', 'M', 'L', 'XL', 'XXL'],
   dresses: ['XS', 'S', 'M', 'L', 'XL'],
@@ -50,9 +50,6 @@ const SIZES_BY_CATEGORY: Record<GarmentCategory, string[]> = {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
-
-const isGarmentCategory = (value: string): value is GarmentCategory =>
-  value === 'upper_body' || value === 'lower_body' || value === 'dresses';
 
 const isCatalogRow = (value: unknown): value is CatalogRow => {
   if (!isRecord(value)) {
@@ -76,7 +73,7 @@ const sizesForCategory = (category: string): string[] => {
   if (!isGarmentCategory(category)) {
     return ['S', 'M', 'L'];
   }
-  return SIZES_BY_CATEGORY[category];
+  return SIZES_BY_CATEGORY[category] ?? [];
 };
 
 const requireEnv = (name: 'EXPO_PUBLIC_SUPABASE_URL' | 'SUPABASE_SERVICE_ROLE_KEY'): string => {
