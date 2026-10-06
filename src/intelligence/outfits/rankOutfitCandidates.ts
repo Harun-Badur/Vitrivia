@@ -7,6 +7,7 @@ import {
   type RankedOutfitCandidate,
 } from './outfitRanking';
 import type { OutfitCandidate, OutfitCandidateItem, WardrobeItemForCandidate } from './outfitCandidate';
+import { hasCoreFootwear } from './outfitCandidate';
 import type { Product } from '../../../types/product';
 import { catalogCompatibility, catalogSemanticKey } from './catalogCompatibility';
 import { cooperativeSort, runCooperatively, runSynchronously, type CooperativeWorkOptions } from '../cooperativeWork';
@@ -16,10 +17,12 @@ const compareText = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
 
 /** Hard structure first, then measured soft compatibility; never compare identifiers. */
-const compareValues = (left: OutfitRankingValue, right: OutfitRankingValue): number =>
+const compareValues = (left: OutfitRankingValue, right: OutfitRankingValue,
+  leftFootwear: boolean, rightFootwear: boolean): number =>
   Number(right.validRoles) - Number(left.validRoles) ||
   Number(right.coreComplete) - Number(left.coreComplete) ||
   left.missingCoreRoles.length - right.missingCoreRoles.length ||
+  Number(rightFootwear) - Number(leftFootwear) ||
   right.optionalRoleCount - left.optionalRoleCount ||
   right.sharedStyleTags.length - left.sharedStyleTags.length ||
   (right.compatibilityScore ?? 0) - (left.compatibilityScore ?? 0) ||
@@ -30,7 +33,8 @@ const compareEvaluated = (
   right: { candidate: OutfitCandidate; rankingValue: OutfitRankingValue },
   cache: WeakMap<object, string>,
 ): number =>
-  compareValues(left.rankingValue, right.rankingValue) ||
+  compareValues(left.rankingValue, right.rankingValue,
+    hasCoreFootwear(left.candidate.items), hasCoreFootwear(right.candidate.items)) ||
   compareSemantics(left.candidate, right.candidate, cache);
 
 const semanticItemKey = (item: OutfitCandidateItem, cache: WeakMap<object, string>): string => {
@@ -112,6 +116,7 @@ export const rankOutfitCandidatesAsync = <T extends WardrobeItemForCandidate>(
 ): Promise<RankedOutfitCandidate<T>[]> => runCooperatively(rankingWork(candidates, anchor, true), options);
 
 interface DiversityBoundary {
+  footwear: number;
   optionalCount: number;
   styleCount: number;
   compatibility: number;
@@ -119,7 +124,8 @@ interface DiversityBoundary {
 
 /**
  * Exact firstOnly search: generation guarantees valid/complete core roles. Diversity
- * admits only the best optional/style tier and compatibility >= best - 0.12.
+ * admits the best core-footwear tier first, then its optional/style tier and
+ * compatibility >= best - 0.12.
  * Colors, reasons and semantic ties therefore cannot change admission, but are
  * still evaluated by the original stable ranking for every retained candidate.
  * Full ranking of arbitrary input remains the reference path above.
@@ -137,14 +143,15 @@ export const rankDiversityCandidatesAsync = async <T extends WardrobeItemForCand
     return value;
   };
   type Remaining = readonly (readonly OutfitCandidateItem<T>[])[];
-  const futures = new WeakMap<Remaining, { capacity: number; sums: number[]; tags: Map<string, number> }>();
+  const futures = new WeakMap<Remaining, { footwear: boolean; capacity: number; sums: number[]; tags: Map<string, number> }>();
   const future = (groups: Remaining) => {
     const cached = futures.get(groups);
     if (cached) return cached;
-    let sums = [0], capacity = 0;
+    let sums = [0], capacity = 0, footwear = false;
     const tags = new Map<string, number>();
     for (const group of groups) {
       if (group.length === 0) continue;
+      footwear ||= group.some(item => item.role === 'shoes');
       capacity++;
       let zero = false, maximum = -Infinity;
       const roleTags = new Set<string>();
@@ -166,7 +173,7 @@ export const rankDiversityCandidatesAsync = async <T extends WardrobeItemForCand
       }
       sums = next;
     }
-    const value = { capacity, sums, tags };
+    const value = { footwear, capacity, sums, tags };
     futures.set(groups, value);
     return value;
   };
@@ -200,6 +207,7 @@ export const rankDiversityCandidatesAsync = async <T extends WardrobeItemForCand
   };
   let best: DiversityBoundary | null = null;
   const minimum = (items: readonly OutfitCandidateItem<T>[], optionalCount: number): DiversityBoundary => ({
+    footwear: Number(hasCoreFootwear(items)),
     optionalCount,
     styleCount: evaluateOutfitMinimum(items, tokens).sharedStyleTags.length,
     compatibility: compatibilityForItems(items, anchor, scores),
@@ -210,6 +218,8 @@ export const rankDiversityCandidatesAsync = async <T extends WardrobeItemForCand
     canExtend: (items, groups, optionalCount) => {
       if (!best) return true;
       const remaining = future(groups), capacity = optionalCount + remaining.capacity;
+      const footwear = Number(hasCoreFootwear(items) || remaining.footwear);
+      if (footwear !== best.footwear) return footwear > best.footwear;
       if (capacity !== best.optionalCount) return capacity > best.optionalCount;
       const styles = styleUpper(items, remaining);
       if (styles !== best.styleCount) return styles > best.styleCount;
@@ -217,9 +227,10 @@ export const rankDiversityCandidatesAsync = async <T extends WardrobeItemForCand
     },
     accept: (items, optionalCount) => {
       const value = minimum(items, optionalCount);
-      if (!best || value.optionalCount > best.optionalCount ||
-        (value.optionalCount === best.optionalCount && (value.styleCount > best.styleCount ||
-          (value.styleCount === best.styleCount && value.compatibility > best.compatibility)))) best = value;
+      if (!best || value.footwear > best.footwear ||
+        (value.footwear === best.footwear && (value.optionalCount > best.optionalCount ||
+          (value.optionalCount === best.optionalCount && (value.styleCount > best.styleCount ||
+            (value.styleCount === best.styleCount && value.compatibility > best.compatibility)))))) best = value;
       return false;
     },
   }, options);
@@ -232,12 +243,13 @@ export const rankDiversityCandidatesAsync = async <T extends WardrobeItemForCand
   const candidates = await searchOutfitCandidatesAsync(searchInput, {
     canExtend: (items, groups, optionalCount) => {
       const remaining = future(groups), capacity = optionalCount + remaining.capacity;
+      if (Number(hasCoreFootwear(items) || remaining.footwear) < boundary.footwear) return false;
       if (capacity < boundary.optionalCount || styleUpper(items, remaining) < boundary.styleCount) return false;
       // If excess roles appear possible, skipping is still allowed: do not apply this bound.
       return capacity > boundary.optionalCount || compatibilityUpper(items, remaining) >= threshold;
     },
     accept: (items, optionalCount) => {
-      if (optionalCount !== boundary.optionalCount) return false;
+      if (Number(hasCoreFootwear(items)) !== boundary.footwear || optionalCount !== boundary.optionalCount) return false;
       const value = minimum(items, optionalCount);
       return value.styleCount === boundary.styleCount && value.compatibility >= threshold;
     },

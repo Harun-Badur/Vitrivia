@@ -1,4 +1,5 @@
 import type { Product } from '../types/product';
+import { discoverPrefetchTrace } from './discoverPrefetchInstrumentation';
 import type { WardrobeItemForCandidate } from '../src/intelligence/outfits/outfitCandidate';
 import type { OutfitDiscoverRecommendation } from '../src/intelligence/recommendations/discoverRecommendation';
 import { complementaryProductsForDisplay } from '../src/intelligence/recommendations/complementaryProductsForDisplay';
@@ -16,6 +17,8 @@ export class DiscoverRecommendationCache {
   private readonly entries = new Map<string, Entry[]>();
   private readonly pinned = new Map<string, Entry>();
   private generation = 0;
+  private window: readonly Product[] = [];
+  private readonly preparationListeners = new Set<() => void>();
   readonly contextFingerprint: string;
   constructor(readonly catalog: readonly Product[], readonly wardrobe: readonly WardrobeItemForCandidate[], owner: string | null) {
     this.contextFingerprint = fingerprint([owner, RECOMMENDATION_ENGINE_VERSION, catalog, wardrobe]);
@@ -26,6 +29,25 @@ export class DiscoverRecommendationCache {
       candidatePool: this.catalog, wardrobeItems: this.wardrobe, anchors: [...anchors],
       exposure: [...this.exposure], shownAnchorIds: [...this.shown],
       reusableAnchorIds: anchors.filter(product => this.pinned.get(product.id)?.product === product).map(product => product.id) };
+  }
+  get preparationWindow(): readonly Product[] { return this.window; }
+  setPreparationWindow(products: readonly Product[]): void {
+    const window = products.slice(0, 3);
+    if (window.length === this.window.length && window.every((product, index) => product === this.window[index])) return;
+    this.window = window;
+    if (__DEV__) {
+      discoverPrefetchTrace(this).window(window);
+      discoverPrefetchTrace(this).settle(this);
+    }
+    this.preparationListeners.forEach(listener => listener());
+  }
+  subscribePreparation(listener: () => void): () => void {
+    this.preparationListeners.add(listener);
+    return () => { this.preparationListeners.delete(listener); };
+  }
+  /** Image warming only; display reads must still validate exposure through lookup. */
+  peekPrepared(product: Product): readonly OutfitDiscoverRecommendation[] | undefined {
+    return this.entries.get(product.id)?.slice().reverse().find(entry => entry.product === product)?.result;
   }
   accept(packet: RecommendationFeedPacket, anchors: readonly Product[]): boolean {
     if (!packet || !Array.isArray(packet.entries) || packet.sessionId !== this.sessionId ||
@@ -44,7 +66,10 @@ export class DiscoverRecommendationCache {
       const entry = { product, result: result.value, exposure };
       const entries = this.entries.get(product.id) ?? [];
       entries.push(entry); this.entries.set(product.id, entries); accepted = true;
+      if (__DEV__) discoverPrefetchTrace(this).stage(product, 'packetAcceptedAt');
+      if (__DEV__) discoverPrefetchTrace(this).published(this, product);
     }
+    if (__DEV__) discoverPrefetchTrace(this).settle(this);
     return accepted;
   }
   private find(product: Product): Entry | undefined {
@@ -63,5 +88,6 @@ export class DiscoverRecommendationCache {
     for (const recommended of complementaryProductsForDisplay(entry.result, product.id)) {
       this.exposure.set(recommended.id, (this.exposure.get(recommended.id) ?? 0) + 1);
     }
+    this.preparationListeners.forEach(listener => listener());
   }
 }

@@ -39,6 +39,7 @@ describe('Node recommendation cache worker', () => {
     const prepare = jest.spyOn(engine, 'prepareDiscoverRankingAsync');
     const complete = jest.spyOn(engine, 'completeDiscoverRecommendationsAsync');
     let comparisons = 0;
+    const preparedFinalKeys = new Set<string>();
     for (const wardrobeItems of [[], owned]) {
       const first = createAnchorCacheContext({ candidatePool: catalog, anchor: required, wardrobeItems });
       const initial = engine.getDiscoverRecommendations(first.input)[0]?.displayProducts ?? [];
@@ -46,9 +47,14 @@ describe('Node recommendation cache worker', () => {
         const context = createAnchorCacheContext({ candidatePool: catalog, anchor: required, wardrobeItems,
           exposure: new Map(initial.map(item => [item.id, count])) });
         const expected = engine.getDiscoverRecommendations(context.input);
+        const finalFingerprint = createFinalCacheKey(context).fingerprint;
+        const alreadyPrepared = preparedFinalKeys.has(finalFingerprint);
         const outcome = await worker.prepare(context, { budgetMs: 1_000_000 });
-        expect(outcome.final).toBe('miss');
-        expect(outcome.ranking).toBe(count === 0 ? 'miss' : 'hit');
+        // Explicit age filtering can leave no catalog complements: changing
+        // exposure over an empty list reuses the same final key, correctly a hit.
+        expect(outcome.final).toBe(alreadyPrepared ? 'hit' : 'miss');
+        expect(outcome.ranking).toBe(alreadyPrepared ? 'not-read' : count === 0 ? 'miss' : 'hit');
+        preparedFinalKeys.add(finalFingerprint);
         expect(outcome.result).toStrictEqual(expected);
         const persisted = await store.read(createFinalCacheKey(context));
         const hit = hydrateFinal(persisted!, context);
@@ -67,7 +73,7 @@ describe('Node recommendation cache worker', () => {
     }
     expect(comparisons).toBe(12);
     expect(prepare).toHaveBeenCalledTimes(2);
-    expect(complete).toHaveBeenCalledTimes(12);
+    expect(complete).toHaveBeenCalledTimes(preparedFinalKeys.size);
   }, 120_000);
 
   it('returns cached valid empty results without treating them as misses', async () => {

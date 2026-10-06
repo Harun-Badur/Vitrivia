@@ -65,6 +65,7 @@ import {
 } from '../../services/deeplinkService';
 import { fetchRecommendationCatalog } from '../../services/productService';
 import { DiscoverRecommendationCache } from '../../lib/discoverRecommendationCache';
+import { discoverPrefetchTrace, instrumentationContextId } from '../../lib/discoverPrefetchInstrumentation';
 import { loadDiscoverRecommendationPacket } from '../../services/discoverRecommendationCacheService';
 import { complementaryProductsForDisplay } from '../../src/intelligence/recommendations/complementaryProductsForDisplay';
 import { DEFAULT_SEARCH_BRANDS } from '../../lib/searchQueryParse';
@@ -212,6 +213,7 @@ export default function FeedScreen() {
 
   const userId = user?.id ?? null;
   const canLike = user !== null;
+  const preparationDiagnosticState = useRef({ catalogReady: false, wardrobeReady: false });
   const [recommendationCatalog, setRecommendationCatalog] = useState<Product[]>(
     [],
   );
@@ -221,13 +223,20 @@ export default function FeedScreen() {
       // The first ranked feed is critical; the optional recommendation pool is not.
       if (feedStatus !== 'success') return;
       let active = true;
+      if (__DEV__) preparationDiagnosticState.current.catalogReady = false;
       void fetchRecommendationCatalog()
         .then((products) => {
-          if (active) setRecommendationCatalog(products);
+          if (active) {
+            if (__DEV__) preparationDiagnosticState.current.catalogReady = true;
+            setRecommendationCatalog(products);
+          }
         })
         .catch((error) => {
           logger.warn('Öneri kataloğu okunamadı', { error });
-          if (active) setRecommendationCatalog([]);
+          if (active) {
+            if (__DEV__) preparationDiagnosticState.current.catalogReady = true;
+            setRecommendationCatalog([]);
+          }
         });
       return () => {
         active = false;
@@ -248,7 +257,9 @@ export default function FeedScreen() {
   useFocusEffect(
     useCallback(() => {
       let active = true;
+      if (__DEV__) preparationDiagnosticState.current.wardrobeReady = false;
       if (userId === null || missingWardrobeTable.current) {
+        if (__DEV__) preparationDiagnosticState.current.wardrobeReady = true;
         clearWardrobeRecommendations(userId);
         return () => {
           active = false;
@@ -257,6 +268,7 @@ export default function FeedScreen() {
 
       const client = getSupabaseClient();
       if (client === null) {
+        if (__DEV__) preparationDiagnosticState.current.wardrobeReady = true;
         clearWardrobeRecommendations(userId);
         return () => {
           active = false;
@@ -279,7 +291,10 @@ export default function FeedScreen() {
               );
             },
           );
-          if (active) setWardrobeForRecommendations({ userId, items });
+          if (active) {
+            if (__DEV__) preparationDiagnosticState.current.wardrobeReady = true;
+            setWardrobeForRecommendations({ userId, items });
+          }
         } catch (error) {
           if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'PGRST205') {
             missingWardrobeTable.current = true;
@@ -287,7 +302,10 @@ export default function FeedScreen() {
           } else {
             logger.warn('Dolap parçaları öneriler için okunamadı', { error });
           }
-          if (active) clearWardrobeRecommendations(userId);
+          if (active) {
+            if (__DEV__) preparationDiagnosticState.current.wardrobeReady = true;
+            clearWardrobeRecommendations(userId);
+          }
         }
       })();
       return () => {
@@ -301,42 +319,96 @@ export default function FeedScreen() {
     [recommendationCatalog, userId, wardrobeForRecommendations]);
   const [recommendationRevision, publishRecommendations] = useState(0);
   const recommendationFocused = useRef(false);
-  const preparationInputs = useRef({ session: recommendationSession, products: currentProducts, feedStatus });
+  const preparationInputs = useRef({ session: recommendationSession, products: currentProducts, feedStatus, feedPreparationRevision });
   useLayoutEffect(() => {
-    preparationInputs.current = { session: recommendationSession, products: currentProducts, feedStatus };
+    if (__DEV__) {
+      discoverPrefetchTrace(recommendationSession).bind(recommendationSession, feedPreparationRevision);
+      discoverPrefetchTrace(recommendationSession).feedUpdate(currentProducts, feedPreparationRevision);
+    }
+    preparationInputs.current = { session: recommendationSession, products: currentProducts, feedStatus, feedPreparationRevision };
+    recommendationSession.setPreparationWindow(currentProducts);
     if (recommendationFocused.current && currentProduct) recommendationSession.activate(currentProduct);
-  }, [recommendationSession, currentProducts, currentProduct, feedStatus, recommendationRevision]);
+  }, [recommendationSession, currentProducts, currentProduct, feedStatus, recommendationRevision, feedPreparationRevision]);
   const prefetchedCovers = useRef(new Set<string>());
   useFocusEffect(useCallback(() => {
     recommendationFocused.current = true;
     const controller = new AbortController();
-    const latest = preparationInputs.current;
-    if (feedStatus === 'success' && recommendationSession.catalog.length > 0 &&
-      (userId === null || wardrobeForRecommendations.userId === userId)) {
-      if (latest.products[0]) recommendationSession.activate(latest.products[0]);
-      const anchors = [...latest.products];
-      const request = recommendationSession.request(anchors, feedPreparationRevision);
-      void loadDiscoverRecommendationPacket(request, userId, controller.signal, packet => {
-        if (controller.signal.aborted || !recommendationFocused.current || preparationInputs.current.session !== recommendationSession) return;
-        if (!recommendationSession.accept(packet, anchors)) return;
-        const active = preparationInputs.current.products[0];
-        if (active) recommendationSession.activate(active);
-        publishRecommendations(revision => revision + 1);
-        const imageUrls = [...new Set(anchors.flatMap(product => complementaryProductsForDisplay(
-          recommendationSession.lookup(product) ?? EMPTY_RECOMMENDATIONS, product.id).flatMap(recommended => getProductImages(recommended).slice(0, 1))))]
-          .filter(url => !prefetchedCovers.current.has(url));
-        if (imageUrls.length > 0) {
-          imageUrls.forEach(url => prefetchedCovers.current.add(url));
-          void Image.prefetch(imageUrls, { cachePolicy: 'memory-disk' }).catch(() => {
-            imageUrls.forEach(url => prefetchedCovers.current.delete(url));
-          });
+    let workerRequested = false;
+    let unsubscribeColdStart = () => {};
+    const startPreparation = () => {
+      if (workerRequested || controller.signal.aborted || !recommendationFocused.current ||
+        preparationInputs.current.session !== recommendationSession) return;
+      const latest = preparationInputs.current;
+      if (__DEV__) {
+        const trace = discoverPrefetchTrace(recommendationSession);
+        trace.bind(recommendationSession, latest.feedPreparationRevision);
+        trace.effectEntered(latest.products, {
+          feedStatus, catalogLength: recommendationSession.catalog.length,
+          catalogReady: preparationDiagnosticState.current.catalogReady,
+          currentProductsLength: latest.products.length, anchorIds: latest.products.slice(0, 3).map(product => product.id),
+          isFocused: recommendationFocused.current, userIdPresent: userId !== null,
+          wardrobeUserId: wardrobeForRecommendations.userId === null ? null : instrumentationContextId(wardrobeForRecommendations.userId),
+          wardrobeReady: preparationDiagnosticState.current.wardrobeReady,
+          wardrobeMatchesUser: wardrobeForRecommendations.userId === userId,
+          signalAborted: controller.signal.aborted,
+        });
+      }
+      if (feedStatus === 'success' && recommendationSession.catalog.length > 0 &&
+        (userId === null || wardrobeForRecommendations.userId === userId)) {
+        const anchors = [...latest.products];
+        if (anchors.length > 0) {
+          workerRequested = true;
+          unsubscribeColdStart();
         }
-      }).catch(error => { if (!controller.signal.aborted) logger.warn('Recommendation cache paketi okunamadı', { error }); });
-    }
-    return () => { recommendationFocused.current = false; controller.abort(); };
-    // Feed batches/context/focus own preparation. Anchor transitions and exposure
-    // revisions deliberately do not trigger requests or computation.
-  }, [recommendationSession, feedPreparationRevision, feedStatus, userId, wardrobeForRecommendations.userId]));
+        if (latest.products[0]) recommendationSession.activate(latest.products[0]);
+        const request = recommendationSession.request(anchors, latest.feedPreparationRevision);
+        if (__DEV__) discoverPrefetchTrace(recommendationSession).diagnostic('workerStartAttempt', {
+          workerStartAttempt: true, anchorCount: anchors.length, signalAborted: controller.signal.aborted });
+        void loadDiscoverRecommendationPacket(request, userId, controller.signal, packet => {
+          if (controller.signal.aborted || !recommendationFocused.current || preparationInputs.current.session !== recommendationSession) return;
+          if (!recommendationSession.accept(packet, preparationInputs.current.products)) return;
+          const active = preparationInputs.current.products[0];
+          if (active) recommendationSession.activate(active);
+          publishRecommendations(revision => revision + 1);
+          const imageUrls = [...new Set(preparationInputs.current.products.flatMap(product => complementaryProductsForDisplay(
+            recommendationSession.peekPrepared(product) ?? EMPTY_RECOMMENDATIONS, product.id).flatMap(recommended => getProductImages(recommended).slice(0, 1))))]
+            .filter(url => !prefetchedCovers.current.has(url));
+          if (imageUrls.length > 0) {
+            imageUrls.forEach(url => prefetchedCovers.current.add(url));
+            void Image.prefetch(imageUrls, { cachePolicy: 'memory-disk' }).catch(() => {
+              imageUrls.forEach(url => prefetchedCovers.current.delete(url));
+            });
+          }
+        }, recommendationSession).catch(error => {
+          if (__DEV__) discoverPrefetchTrace(recommendationSession).diagnostic('workerStartBlocked', {
+            workerStartBlocked: true, blockedReason: controller.signal.aborted ? 'ABORTED' : 'WORKER_START_ERROR' });
+          if (!controller.signal.aborted) logger.warn('Recommendation cache paketi okunamadı', { error });
+        });
+      }
+    };
+    // A NO_ANCHORS request installs no worker. Retry only that cold-start gap;
+    // once requested, the existing worker owns all window/append notifications.
+    unsubscribeColdStart = recommendationSession.subscribePreparation(() => {
+      if (preparationInputs.current.products.length > 0) startPreparation();
+    });
+    startPreparation();
+    return () => {
+      unsubscribeColdStart();
+      recommendationFocused.current = false;
+      if (__DEV__) discoverPrefetchTrace(recommendationSession).closeReason =
+        preparationInputs.current.session !== recommendationSession ? 'context_changed'
+          : preparationInputs.current.feedStatus !== 'success' ? 'feed_invalidated' : 'focus_lost';
+      if (__DEV__) discoverPrefetchTrace(recommendationSession).diagnostic('effectCleanup', {
+        reason: discoverPrefetchTrace(recommendationSession).closeReason, signalAborted: controller.signal.aborted });
+      controller.abort();
+    };
+    // Context/focus own the request. Appending feed anchors does not invalidate it.
+    // Window promotion only reprioritizes
+    // its existing preparation queue; exposure refresh reuses prepared ranking.
+  }, [recommendationSession, feedStatus, userId, wardrobeForRecommendations.userId]));
+  useEffect(() => {
+    if (__DEV__) discoverPrefetchTrace(recommendationSession).productsObserved(currentProducts, feedPreparationRevision);
+  }, [recommendationSession, currentProducts, feedPreparationRevision]);
 
   const selectedRecommendationProductIds = useMemo(
     () => likedProducts.map(item => item.product.id), [likedProducts],
@@ -478,6 +550,11 @@ export default function FeedScreen() {
   const handleSwipeLeft = useCallback(
     (product: Product): void => {
       try {
+        if (__DEV__) {
+          const products = useAppStore.getState?.().currentProducts ?? preparationInputs.current.products;
+          discoverPrefetchTrace(preparationInputs.current.session).recordSwipe(
+            preparationInputs.current.session, product, products[1]);
+        }
         swipeLeft(product);
       } catch (error) {
         logger.error('Geçme işlenemedi', { error, productId: product.id });

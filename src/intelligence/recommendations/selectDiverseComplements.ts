@@ -1,5 +1,6 @@
 import type { Product, OutfitRole } from '../../../types/product';
 import type { WardrobeItemForCandidate } from '../outfits/outfitCandidate';
+import { hasCoreFootwear } from '../outfits/outfitCandidate';
 import type { RankedOutfitCandidate } from '../outfits/outfitRanking';
 import { catalogCompatibility, catalogSemanticKey, sameCatalogProduct } from '../outfits/catalogCompatibility';
 import { runCooperatively, runSynchronously, type CooperativeWorkOptions } from '../cooperativeWork';
@@ -26,6 +27,7 @@ function* selectionWork<T extends WardrobeItemForCandidate>(
   let compatible: RankedOutfitCandidate<T>[] = [];
   for (const entry of ranked) {
     if (entry.rankingValue.validRoles && entry.rankingValue.coreComplete &&
+    hasCoreFootwear(entry.candidate.items) === hasCoreFootwear(best.candidate.items) &&
     entry.rankingValue.optionalRoleCount === best.rankingValue.optionalRoleCount &&
     entry.rankingValue.sharedStyleTags.length === best.rankingValue.sharedStyleTags.length &&
     (entry.rankingValue.compatibilityScore ?? 0) >= (best.rankingValue.compatibilityScore ?? 0) - NEAR_COMPATIBILITY_MARGIN) compatible.push(entry);
@@ -41,10 +43,15 @@ function* selectionWork<T extends WardrobeItemForCandidate>(
 
       yield;
     }
-    // Core completion comes first when the visible anchor is half of a two-piece outfit.
-    const missingCoreRole = anchor.outfitRole === 'top' ? 'bottom' : anchor.outfitRole === 'bottom' ? 'top' : null;
+    // Complete visible core roles before allowing accessories or outerwear.
+    const coreRoles: readonly OutfitRole[] = anchor.outfitRole === 'top' ? ['bottom', 'shoes']
+      : anchor.outfitRole === 'bottom' ? ['top', 'shoes']
+        : anchor.outfitRole === 'one_piece' ? ['shoes']
+          : anchor.outfitRole === 'shoes' ? ['top', 'bottom'] : ['top', 'bottom', 'shoes'];
     const uniqueChoices = [...choices.values()].filter((p) => !sameCatalogProduct(p, anchor) && !selected.some((chosen) => sameCatalogProduct(chosen, p)));
-    const coreChoices = slot === 0 && missingCoreRole ? uniqueChoices.filter((p) => p.outfitRole === missingCoreRole) : [];
+    const missingCoreRole = coreRoles.find(role => !roles.has(role) &&
+      uniqueChoices.some(product => product.outfitRole === role));
+    const coreChoices = missingCoreRole ? uniqueChoices.filter((p) => p.outfitRole === missingCoreRole) : [];
     const available = coreChoices.length ? coreChoices : uniqueChoices;
     let choice: Product | null = null, highest = -Infinity;
     for (const product of available) {

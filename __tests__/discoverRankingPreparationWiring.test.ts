@@ -9,7 +9,7 @@ import { loadDiscoverRecommendationPacket } from '../services/discoverRecommenda
 import { anchorContext, type RecommendationFeedPacket } from '../src/recommendationCache/feedPacket';
 import { serializeFinal } from '../src/recommendationCache/codec';
 import { MOCK_PRODUCTS } from '../data/mockProducts';
-import type { Product } from '../types/product';
+import { getProductImages, type Product } from '../types/product';
 
 const mockLoadFeed = jest.fn();
 const mockLoadMoreFeed = jest.fn();
@@ -169,7 +169,9 @@ const realService = jest.requireActual<
 
 
 jest.mock('react-native', () => ({
-  View: 'View', Text: 'Text', TextInput: 'TextInput', StatusBar: { setBarStyle: jest.fn() },
+  View: 'View', Text: 'Text', TextInput: 'TextInput', StatusBar: {
+    setBarStyle: jest.fn(), pushStackEntry: jest.fn(), popStackEntry: jest.fn(),
+  },
   StyleSheet: { create: (value: unknown) => value, absoluteFillObject: {}, hairlineWidth: 1 },
   useWindowDimensions: () => ({ width: 390, height: 844 }),
 }));
@@ -228,12 +230,42 @@ describe('Discover cache-only wiring', () => {
     await renderer.act(() => publish(packet));
     await update([{ ...top, title: 'Changed snapshot' }, ...catalog.slice(1)]); expect(current()).toEqual([]);
   });
-  it('starts preparation only after a new accepted feed batch and ignores its predecessor', async () => {
+  it('keeps the pending request and its valid publication when a feed batch is appended', async () => {
     await mount(); const old = packet, oldPublish = publish;
-    mockState.feedPreparationRevision++; await update(catalog);
+    const signal = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[0][2];
+    mockState.feedPreparationRevision++; await update([...catalog, { ...bag, id: 'appended' }]);
+    expect(signal.aborted).toBe(false);
+    await renderer.act(() => oldPublish(old)); expect(current().length).toBeGreaterThan(0);
+    expect(loadDiscoverRecommendationPacket).toHaveBeenCalledTimes(1);
+  });
+  it('cancels a real user context change and rejects the old publication', async () => {
+    await mount(); const old = packet, oldPublish = publish;
+    const signal = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[0][2];
+    mockUser = { id: 'new-owner' }; await update(catalog);
+    expect(signal.aborted).toBe(true);
     await renderer.act(() => oldPublish(old)); expect(current()).toEqual([]);
-    await renderer.act(() => publish(packet)); expect(current().length).toBeGreaterThan(0);
+  });
+  it('still cancels when the feed is replaced through a loading transition', async () => {
+    await mount(); const old = packet, oldPublish = publish;
+    const signal = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[0][2];
+    mockState.feedStatus = 'loading'; await update([]);
+    expect(signal.aborted).toBe(true);
+    mockState.feedPreparationRevision++; mockState.feedStatus = 'success'; await update(catalog);
+    await renderer.act(() => oldPublish(old)); expect(current()).toEqual([]);
     expect(loadDiscoverRecommendationPacket).toHaveBeenCalledTimes(2);
+  });
+  it('accepts newly appended window anchors through the original callback', async () => {
+    await mount(); const appended = { ...bag, id: 'appended-anchor' };
+    mockState.feedPreparationRevision++; await update([...catalog, appended]);
+    await update([appended]);
+    const request = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[0][0];
+    const context = anchorContext(catalog, appended, [], new Map());
+    const result = realService.getDiscoverRecommendations(context.input);
+    await renderer.act(() => publish({ sessionId: request.sessionId, generation: request.generation,
+      contextFingerprint: request.contextFingerprint, entries: [{ anchorProductId: appended.id,
+        exposure: [], serialized: serializeFinal(result, context) }] }));
+    expect(current()).toEqual(result);
+    expect(loadDiscoverRecommendationPacket).toHaveBeenCalledTimes(1);
   });
   it('aborts pending delivery on blur and prevents late results from being published', async () => {
     await mount(); const signal = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[0][2];
@@ -244,5 +276,57 @@ describe('Discover cache-only wiring', () => {
   it('never waits for recommendation image prefetch before rendering a hit', async () => {
     jest.mocked(Image.prefetch).mockImplementation(() => new Promise(() => {}));
     await mount(); await renderer.act(() => publish(packet)); expect(current().length).toBeGreaterThan(0);
+  });
+  it('retries an initial NO_ANCHORS request when the first products arrive', async () => {
+    mockState.currentProducts = [];
+    await mount();
+    expect(loadDiscoverRecommendationPacket).toHaveBeenCalledTimes(1);
+    const emptyCall = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[0];
+    expect(emptyCall[0].anchors).toEqual([]);
+    await update(catalog);
+    expect(loadDiscoverRecommendationPacket).toHaveBeenCalledTimes(2);
+    const startedCall = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[1];
+    expect(startedCall[0].anchors).toEqual(catalog);
+    expect(startedCall[2]).toBe(emptyCall[2]);
+    expect(startedCall[2].aborted).toBe(false);
+    await renderer.act(() => publish(packet));
+    expect(current().length).toBeGreaterThan(0);
+  });
+  it('keeps the cold-start worker when products are appended or temporarily empty', async () => {
+    mockState.currentProducts = [];
+    await mount(); await update(catalog);
+    const signal = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[1][2];
+    mockState.feedPreparationRevision++;
+    await update([...catalog, { ...bag, id: 'cold-append' }]);
+    await update([]); await update(catalog);
+    expect(loadDiscoverRecommendationPacket).toHaveBeenCalledTimes(2);
+    expect(signal.aborted).toBe(false);
+  });
+  it('removes the empty-anchor retry on blur and starts only after refocus', async () => {
+    mockState.currentProducts = [];
+    await mount();
+    const signal = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[0][2];
+    mockFocused = false; await update([]); await update(catalog);
+    expect(signal.aborted).toBe(true);
+    expect(loadDiscoverRecommendationPacket).toHaveBeenCalledTimes(1);
+    mockFocused = true; await update(catalog);
+    expect(loadDiscoverRecommendationPacket).toHaveBeenCalledTimes(2);
+    expect(jest.mocked(loadDiscoverRecommendationPacket).mock.calls[1][2].aborted).toBe(false);
+  });
+  it('updates the preparation window without a new request and warms next recommendation images before promotion', async () => {
+    await mount();
+    const session = jest.mocked(loadDiscoverRecommendationPacket).mock.calls[0][4]!;
+    expect(session.preparationWindow).toEqual(catalog.slice(0, 3));
+    const alreadyWarmed = new Set(jest.mocked(Image.prefetch).mock.calls.flatMap(([urls]) =>
+      typeof urls === 'string' ? [urls] : urls));
+    await renderer.act(() => publish({ ...packet, entries: [packet.entries[1]] }));
+    expect(current()).toEqual([]);
+    const nextImages = complementaryProductsForDisplay(session.peekPrepared(bottom)!, bottom.id)
+      .flatMap(product => getProductImages(product).slice(0, 1)).filter(url => !alreadyWarmed.has(url));
+    expect(nextImages.length).toBeGreaterThan(0);
+    expect(Image.prefetch).toHaveBeenCalledWith(expect.arrayContaining(nextImages), { cachePolicy: 'memory-disk' });
+    await update(catalog.slice(1));
+    expect(session.preparationWindow).toEqual(catalog.slice(1, 4));
+    expect(loadDiscoverRecommendationPacket).toHaveBeenCalledTimes(1);
   });
 });

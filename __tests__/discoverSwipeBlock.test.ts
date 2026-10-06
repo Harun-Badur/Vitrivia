@@ -1,15 +1,29 @@
 import { createElement, type ElementType, type ReactElement } from 'react';
 import { StyleSheet, Text, type ViewStyle } from 'react-native';
 import type { SharedValue } from 'react-native-reanimated';
+import { withSpring } from 'react-native-reanimated';
+import { Gesture } from 'react-native-gesture-handler';
 import SwipeCard, { type SwipeCardProps } from '../components/SwipeCard';
 import { getDiscoverRecommendations } from '../src/intelligence/recommendations/getDiscoverRecommendations';
 import { formatTryPrice, type Product, type OutfitRole } from '../types/product';
+
+jest.mock('react-native', () => {
+  const flatten = (style: unknown): Record<string, unknown> => Array.isArray(style)
+    ? Object.assign({}, ...style.map(flatten)) : typeof style === 'object' && style !== null ? style as Record<string, unknown> : {};
+  return {
+    ActivityIndicator: 'ActivityIndicator', Modal: 'Modal', Text: 'Text', View: 'View',
+    Dimensions: { get: () => ({ width: 390, height: 844 }) },
+    useWindowDimensions: () => ({ width: 390, height: 844 }),
+    StyleSheet: { create: (styles: unknown) => styles, flatten, hairlineWidth: 1, absoluteFill: {}, absoluteFillObject: {} },
+  };
+});
 
 jest.mock('lucide-react-native', () => ({
   ChevronRight: 'ChevronRight', Heart: 'Heart', Maximize: 'Maximize',
   ShoppingBag: 'ShoppingBag', Sparkles: 'Sparkles', X: 'X', Check: 'Check',
 }));
-jest.mock('expo-image', () => ({ Image: Object.assign('Image', {
+jest.mock('expo-image', () => ({ Image: Object.assign((props: Record<string, unknown>) =>
+  jest.requireActual<typeof import('react')>('react').createElement('Image', props), {
   prefetch: jest.fn(), getCachePathAsync: jest.fn().mockResolvedValue(null),
 }) }));
 jest.mock('../components/PressableScale', () => 'PressableScale');
@@ -46,6 +60,7 @@ jest.mock('react-native-reanimated', () => ({
   useSharedValue: (value: number | boolean) => jest.requireActual<typeof import('react')>('react').useRef({ value }).current,
   useAnimatedStyle: (factory: () => Record<string, unknown>) => ({ get current() { return factory(); } }),
   cancelAnimation: jest.fn(), runOnJS: (callback: () => void) => callback,
+  runOnUI: (callback: () => void) => callback,
   withTiming: jest.fn(), withSpring: jest.fn(), withSequence: jest.fn(),
   interpolate: jest.fn(), Extrapolation: { CLAMP: 'clamp' },
 }));
@@ -65,6 +80,86 @@ const product = (id: string, role: OutfitRole): Product => ({
   id, title: id, brand: 'Example', price: 1000, imageUrl: `https://example.com/${id}.jpg`,
   category: role === 'bottom' ? 'lower_body' : role === 'shoes' ? 'shoes' : 'upper_body',
   outfitRole: role, gender: 'women', garmentDescription: id,
+});
+
+describe('SwipeCard exit animation ownership', () => {
+  let tree: ReturnType<typeof renderer.create>;
+  let props: SwipeCardProps;
+  const pan = () => {
+    const calls = jest.mocked(Gesture.Exclusive).mock.calls;
+    return calls[calls.length - 1][1] as unknown as { onEnd: jest.Mock; onUpdate: jest.Mock };
+  };
+  const end = (direction: 'pass' | 'undo') => pan().onEnd.mock.calls[0][0]({
+    translationY: direction === 'pass' ? -200 : 200, velocityY: 0,
+  });
+  const callback = () => {
+    const calls = jest.mocked(withSpring).mock.calls;
+    return calls[calls.length - 1][2]!;
+  };
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    props = {
+      product: product('gesture-anchor', 'top'), pageIndex: 0, canUndo: true,
+      pageHeight: { value: 700 } as SharedValue<number>, dragOffset: { value: 0 } as SharedValue<number>,
+      onAddToCloset: jest.fn(), onPass: jest.fn(), onUndoPass: jest.fn(),
+      onVirtualTryOn: jest.fn(), onBuy: jest.fn(), onImpression: jest.fn(),
+    };
+    await renderer.act(async () => { tree = renderer.create(createElement(SwipeCard, props)); });
+  });
+  afterEach(async () => { await renderer.act(() => tree.unmount()); });
+
+  it.each(['pass', 'undo'] as const)('commits a completed %s once and retains its lock until rollover', async direction => {
+    await renderer.act(() => { end(direction); });
+    expect(withSpring).toHaveBeenLastCalledWith(direction === 'pass' ? -700 : 700, expect.any(Object), expect.any(Function));
+    expect(props.onPass).not.toHaveBeenCalled();
+    expect(props.onUndoPass).not.toHaveBeenCalled();
+    await renderer.act(() => { callback()(true); });
+    expect(direction === 'pass' ? props.onPass : props.onUndoPass).toHaveBeenCalledTimes(1);
+    expect(direction === 'pass' ? props.onUndoPass : props.onPass).not.toHaveBeenCalled();
+    await renderer.act(() => { end(direction); });
+    expect(withSpring).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['pass', 'undo'] as const)('does not commit a cancelled %s and accepts another swipe', async direction => {
+    await renderer.act(() => { end(direction); });
+    await renderer.act(() => { callback()(false); });
+    expect(props.onPass).not.toHaveBeenCalled();
+    expect(props.onUndoPass).not.toHaveBeenCalled();
+    await renderer.act(() => { pan().onUpdate.mock.calls[0][0]({ translationY: -80 }); });
+    expect(props.dragOffset.value).toBe(-80);
+    await renderer.act(() => { end('pass'); });
+    expect(withSpring).toHaveBeenCalledTimes(2);
+    await renderer.act(() => { callback()(true); });
+    expect(props.onPass).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a cancelled old callback after a newer gesture takes ownership', async () => {
+    await renderer.act(() => { end('pass'); });
+    const oldCallback = callback();
+    await renderer.act(() => { oldCallback(false); end('undo'); });
+    const newCallback = callback();
+    await renderer.act(() => { oldCallback(false); oldCallback(true); });
+    // Neither unlock the new exit nor dispatch the stale pass.
+    await renderer.act(() => { end('pass'); });
+    expect(withSpring).toHaveBeenCalledTimes(2);
+    expect(props.onPass).not.toHaveBeenCalled();
+    await renderer.act(() => { newCallback(true); });
+    expect(props.onUndoPass).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates an old exit when the card rolls away and becomes active again', async () => {
+    await renderer.act(() => { end('pass'); });
+    const oldCallback = callback();
+    await renderer.act(() => { tree.update(createElement(SwipeCard, { ...props, pageIndex: 1 })); });
+    await renderer.act(() => { tree.update(createElement(SwipeCard, props)); });
+    await renderer.act(() => { end('undo'); });
+    const newCallback = callback();
+    await renderer.act(() => { oldCallback(false); oldCallback(true); end('pass'); });
+    expect(withSpring).toHaveBeenCalledTimes(2);
+    expect(props.onPass).not.toHaveBeenCalled();
+    await renderer.act(() => { newCallback(true); });
+    expect(props.onUndoPass).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('Discover product block motion', () => {

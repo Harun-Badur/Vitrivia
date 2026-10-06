@@ -1,7 +1,8 @@
 import { isOutfitRole, type OutfitRole, type Product } from '../../../types/product';
 import { cooperativeSort, runCooperatively, runSynchronously, type CooperativeWorkOptions } from '../cooperativeWork';
 import {
-  hasGenderConflict,
+  hasHardConflict,
+  hasCoreFootwear,
   isCatalogRoleCompatible,
   isValidOutfitItems,
   OUTFIT_ROLE_ORDER,
@@ -17,7 +18,7 @@ export interface OutfitCandidateInput<T extends WardrobeItemForCandidate> {
   catalogProducts: readonly Product[];
   /** Restrict generation to outfits containing this catalog item when supplied. */
   requiredCatalogProductId?: string;
-  /** Keep only the highest optional-role tier when the caller needs the first rank. */
+  /** Keep the best footwear/core tier, then its highest optional-role coverage. */
   maximalOnly?: boolean;
 }
 
@@ -151,28 +152,34 @@ function* candidateWork<T extends WardrobeItemForCandidate>(
   for (const top of tops) {
     for (const bottom of bottoms) {
       yield;
-      if (!hasGenderConflict([top, bottom])) bases.push([top, bottom]);
+      if (!hasHardConflict([top, bottom])) bases.push([top, bottom]);
     }
   }
   const onePieces = required?.role === 'top' || required?.role === 'bottom' ? []
     : required?.role === 'one_piece' ? [required] : byRole.get('one_piece') ?? [];
-  for (const onePiece of onePieces) {
+  const shoesAnchorHasTwoPiece = input.maximalOnly && required?.role === 'shoes' &&
+    bases.some(base => !hasHardConflict([...base, required]));
+  for (const onePiece of shoesAnchorHasTwoPiece ? [] : onePieces) {
     bases.push([onePiece]);
   }
 
   const candidates = new Map<string, OutfitCandidate<T>>();
   let highestOptionalCount = -1;
+  let highestFootwear = -1;
   const remainingOptionalCapacity = Array<number>(OPTIONAL_ROLES.length + 1).fill(0);
   for (let index = OPTIONAL_ROLES.length - 1; index >= 0; index--) {
     remainingOptionalCapacity[index] = remainingOptionalCapacity[index + 1] +
       Number((byRole.get(OPTIONAL_ROLES[index])?.length ?? 0) > 0);
   }
   const collect = (items: OutfitCandidateItem<T>[], optionalCount: number): void => {
-    if (input.maximalOnly && optionalCount < highestOptionalCount) return;
+    const footwear = Number(hasCoreFootwear(items));
+    if (input.maximalOnly && (footwear < highestFootwear ||
+      (footwear === highestFootwear && optionalCount < highestOptionalCount))) return;
     if (!isValidOutfitItems(items)) return;
-    if (input.maximalOnly && optionalCount > highestOptionalCount) {
+    if (input.maximalOnly && (footwear > highestFootwear || optionalCount > highestOptionalCount)) {
       candidates.clear();
       highestOptionalCount = optionalCount;
+      highestFootwear = footwear;
     }
     if (search && !search.accept(items, optionalCount)) return;
     const ordered = [...items].sort(compareItems);
@@ -190,8 +197,10 @@ function* candidateWork<T extends WardrobeItemForCandidate>(
     items: OutfitCandidateItem<T>[], optionalIndex: number, optionalCount: number,
   ): Generator<void, void, void> {
     yield;
-    if (input.maximalOnly &&
-        optionalCount + remainingOptionalCapacity[optionalIndex] < highestOptionalCount) return;
+    const footwearUpper = Number(hasCoreFootwear(items) ||
+      suffixGroups[optionalIndex].some(group => group.some(item => item.role === 'shoes')));
+    if (input.maximalOnly && (footwearUpper < highestFootwear ||
+      (footwearUpper === highestFootwear && optionalCount + remainingOptionalCapacity[optionalIndex] < highestOptionalCount))) return;
     if (search && !search.canExtend(items, suffixGroups[optionalIndex], optionalCount)) return;
     if (optionalIndex === OPTIONAL_ROLES.length) {
       collect(items, optionalCount);
@@ -200,13 +209,13 @@ function* candidateWork<T extends WardrobeItemForCandidate>(
     const role = OPTIONAL_ROLES[optionalIndex];
     if (required?.role === role) {
       const next = [...items, required];
-      if (!hasGenderConflict(next)) yield* extend(next, optionalIndex + 1, optionalCount + 1);
+      if (!hasHardConflict(next)) yield* extend(next, optionalIndex + 1, optionalCount + 1);
       return;
     }
     function* withRole(): Generator<void, void, void> {
       for (const item of byRole.get(role) ?? []) {
         const next = [...items, item];
-        if (!hasGenderConflict(next)) yield* extend(next, optionalIndex + 1, optionalCount + 1);
+        if (!hasHardConflict(next)) yield* extend(next, optionalIndex + 1, optionalCount + 1);
       }
     }
     if (input.maximalOnly) {

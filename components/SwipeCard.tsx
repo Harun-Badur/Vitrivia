@@ -22,6 +22,7 @@ import Animated, {
   Extrapolation,
   interpolate,
   runOnJS,
+  runOnUI,
   useAnimatedStyle,
   useSharedValue,
   withSequence,
@@ -249,6 +250,7 @@ function SwipeCard({
   }, [product.id, unregisterPageIndexSV]);
 
   const hasExited = useSharedValue(false);
+  const exitAnimationId = useSharedValue(0);
   const heartBurst = useSharedValue(0);
 
   useEffect(
@@ -260,10 +262,13 @@ function SwipeCard({
 
   // Store settle / page rollover: current tekrar etkileşime açık olsun.
   useLayoutEffect(() => {
-    if (isCurrent) {
-      hasExited.value = false;
-    }
-  }, [hasExited, isCurrent, product.id]);
+    runOnUI(() => {
+      'worklet';
+      // Rollover invalidates callbacks belonging to this card's previous exit.
+      exitAnimationId.value += 1;
+      if (isCurrent) hasExited.value = false;
+    })();
+  }, [exitAnimationId, hasExited, isCurrent, product.id]);
 
   useEffect(() => {
     if (!isCurrent) {
@@ -413,13 +418,17 @@ function SwipeCard({
       const H = pageHeight.value > 0 ? pageHeight.value : CARD_HEIGHT;
 
       if (shouldCommitPass(y, vy)) {
+        const animationId = ++exitAnimationId.value;
         hasExited.value = true;
         dragOffset.value = withSpring(
           -H,
           { ...CARD_THROW_SPRING, velocity: vy },
           (finished) => {
+            if (exitAnimationId.value !== animationId) return;
             if (finished) {
               runOnJS(handlePass)();
+            } else {
+              hasExited.value = false;
             }
           },
         );
@@ -431,13 +440,17 @@ function SwipeCard({
           snapHome();
           return;
         }
+        const animationId = ++exitAnimationId.value;
         hasExited.value = true;
         dragOffset.value = withSpring(
           H,
           { ...CARD_THROW_SPRING, velocity: vy },
           (finished) => {
+            if (exitAnimationId.value !== animationId) return;
             if (finished) {
               runOnJS(handleUndoPass)();
+            } else {
+              hasExited.value = false;
             }
           },
         );
@@ -452,6 +465,7 @@ function SwipeCard({
     if (hasExited.value) {
       return;
     }
+    exitAnimationId.value += 1;
     hasExited.value = true;
     heartBurst.value = withSequence(
       withTiming(1, { duration: HEART_BURST_IN_MS }),
