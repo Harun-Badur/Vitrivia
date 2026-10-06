@@ -24,6 +24,15 @@ export function recommendationMemoValue<T>(name: string, key: string, calculate:
   return value;
 }
 
+// All callers use tr-TR normalization; partition by trim without serializing keys.
+// Bound raw strings retained across recommendation calls.
+const normalizationCaches = [new Map<string, string>(), new Map<string, string>()];
 export function normalizedRecommendationToken(value: string, trim: boolean, calculate: () => string): string {
-  return recommendationMemoValue('normalizationMemo', JSON.stringify(['tr-TR', trim, value]), calculate);
+  const cache = normalizationCaches[Number(trim)];
+  const cached = cache.get(value);
+  if (cached !== undefined) return cached;
+  const normalized = calculate();
+  if (cache.size >= 2048) cache.delete(cache.keys().next().value!);
+  cache.set(value, normalized);
+  return normalized;
 }

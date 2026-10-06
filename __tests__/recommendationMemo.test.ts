@@ -69,6 +69,28 @@ describe('recommendation-local memoization', () => {
     });
   });
 
+  it('reuses role preparation across anchors/scopes and invalidates raw evidence', () => {
+    const product = { ...catalog.find(p => p.outfitRole === 'bottom')!, subcategory: 'PAREO' };
+    const normalize = jest.spyOn(String.prototype, 'toLocaleLowerCase');
+    try {
+      withRecommendationMemo(createRecommendationMemo(), () =>
+        expect(isCatalogRoleCompatible(product, 'bottom')).toBe(false));
+      const calls = normalize.mock.calls.length;
+      withRecommendationMemo(createRecommendationMemo(), () =>
+        expect(isCatalogRoleCompatible(product, 'bottom')).toBe(false));
+      expect(normalize).toHaveBeenCalledTimes(calls);
+      // A distinct object with the same ID must use its own actual metadata.
+      expect(isCatalogRoleCompatible({ ...product, subcategory: 'jean' }, 'bottom')).toBe(true);
+      product.subcategory = ' PAREO ';
+      expect(isCatalogRoleCompatible(product, 'bottom')).toBe(true);
+      product.category = 'upper_body';
+      expect(isCatalogRoleCompatible(product, 'bottom')).toBe(false);
+      expect(isCatalogRoleCompatible(product, 'top')).toBe(true);
+    } finally {
+      normalize.mockRestore();
+    }
+  });
+
   it('invalidates semantic keys after relevant metadata changes', () => {
     const product = { ...catalog[0] };
     const changed = { ...product, title: 'İSTANBUL', currentPrice: 1, colorSlugs: ['BEYAZ'], fit: 'regular' };

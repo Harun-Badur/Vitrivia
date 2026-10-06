@@ -1,5 +1,5 @@
 import { isOutfitRole, type OutfitRole, type Product } from '../../../types/product';
-import { recommendationMemoValue, normalizedRecommendationToken } from '../../../lib/recommendationMemo';
+import { normalizedRecommendationToken } from '../../../lib/recommendationMemo';
 
 /** Fields already present on public.wardrobe_items that candidate generation needs. */
 export interface WardrobeItemForCandidate {
@@ -91,28 +91,42 @@ export const hasGenderConflict = (items: readonly OutfitCandidateItem[]): boolea
   return hasWomen && hasMen;
 };
 
+// Shared across anchors using the same catalog objects. Raw evidence is checked on
+// every read, including in-place edits; weak keys do not retain discarded catalogs.
+const catalogRoleCompatibility = new WeakMap<Product, {
+  category: Product['category'];
+  subcategory: Product['subcategory'];
+  roles: Map<OutfitRole, boolean>;
+}>();
+
 /** Broad categories may contain subtypes that cannot fill their default role. */
 export const isCatalogRoleCompatible = (product: Product, role: OutfitRole): boolean => {
-  return recommendationMemoValue('roleCompatibilityMemo', JSON.stringify([
-    'tr-TR', product.id, product.category, product.subcategory, role,
-  ]), () => {
+  let prepared = catalogRoleCompatibility.get(product);
+  if (!prepared || prepared.category !== product.category || prepared.subcategory !== product.subcategory) {
+    prepared = { category: product.category, subcategory: product.subcategory, roles: new Map() };
+    catalogRoleCompatibility.set(product, prepared);
+  }
+  const cached = prepared.roles.get(role);
+  if (cached !== undefined) return cached;
 
+  let compatible: boolean;
   if (product.category === 'lower_body' && (product.subcategory === undefined || product.subcategory === null ? undefined
       : normalizedRecommendationToken(product.subcategory, false, () => product.subcategory!.toLocaleLowerCase('tr-TR'))) === 'pareo') {
-    return false;
+    compatible = false;
+  } else {
+    const rolesByCategory: Record<Product['category'], readonly OutfitRole[]> = {
+      upper_body: ['top', 'outerwear'],
+      lower_body: ['bottom'],
+      dresses: ['one_piece'],
+      shoes: ['shoes'],
+      bags: ['bag'],
+      hats: ['hat'],
+      accessories: ['accessory'],
+    };
+    compatible = rolesByCategory[product.category].includes(role);
   }
-  const rolesByCategory: Record<Product['category'], readonly OutfitRole[]> = {
-    upper_body: ['top', 'outerwear'],
-    lower_body: ['bottom'],
-    dresses: ['one_piece'],
-    shoes: ['shoes'],
-    bags: ['bag'],
-    hats: ['hat'],
-    accessories: ['accessory'],
-  };
-  return rolesByCategory[product.category].includes(role);
-
-  });
+  prepared.roles.set(role, compatible);
+  return compatible;
 };
 
 export const isValidOutfitItems = (

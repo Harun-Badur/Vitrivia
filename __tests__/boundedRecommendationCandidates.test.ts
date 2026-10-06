@@ -19,6 +19,30 @@ const options = { budgetMs: 1_000_000 };
 describe('exact diversity-band candidate search', () => {
   afterEach(() => jest.restoreAllMocks());
 
+  it.each(['top', 'bottom', 'one_piece'] as const)(
+    'visits only eligible core bases in original order for a %s anchor', async role => {
+      const products = ['top', 'bottom', 'one_piece'].flatMap(role => {
+        const original = catalog.find(p => p.outfitRole === role)!;
+        return [0, 1, 2].map(index => ({ ...original, id: `core-${role}-${index}`, gender: 'unisex' as const }));
+      });
+      const anchor = products.find(p => p.outfitRole === role)!;
+      const visited: string[][] = [];
+      // A fixed clock counts scheduler checkpoints, without timing/profiling.
+      const clock = jest.spyOn(performance, 'now').mockReturnValue(0);
+      await generation.searchOutfitCandidatesAsync({ catalogProducts: products, wardrobeItems: [],
+        requiredCatalogProductId: anchor.id }, {
+        canExtend: items => { visited.push(items.map(item => item.sourceId)); return false; },
+        accept: () => false,
+      }, options);
+      const checkpoints = clock.mock.calls.length;
+      clock.mockRestore();
+      const expected = role === 'one_piece' ? [[anchor.id]] : [0, 1, 2].map(index =>
+        role === 'top' ? [anchor.id, `core-bottom-${index}`] : [`core-top-${index}`, anchor.id]);
+      expect(visited).toEqual(expected);
+      // One slice start + retained pair checkpoints + base-extension checkpoints.
+      expect(checkpoints).toBe(role === 'one_piece' ? 2 : 7);
+    });
+
   it.each(roles)('preserves all results for %s, empty/full wardrobe and exposures', async role => {
     const anchor = catalog.find(product => product.outfitRole === role)!;
     for (const wardrobeItems of [[], owned]) {

@@ -75,6 +75,53 @@ const OPTIONAL_ROLES: readonly OutfitRole[] = [
   'outerwear', 'shoes', 'bag', 'hat', 'accessory',
 ];
 
+// Bound retained catalog/wardrobe snapshots; never key only by mutable arrays.
+const preparationCache = new Map<string, {
+  normalized: OutfitCandidateItem[];
+  roleIndices: Map<OutfitRole, number[]>;
+}>();
+const preparationObjectIds = new WeakMap<object, number>();
+let nextPreparationObjectId = 0;
+const preparationObjectId = (object: object): number => {
+  let id = preparationObjectIds.get(object);
+  if (id === undefined) {
+    id = ++nextPreparationObjectId;
+    preparationObjectIds.set(object, id);
+  }
+  return id;
+};
+
+/** Anchor-independent preparation; return fresh wrappers/groups to protect the cache. */
+export const prepareOutfitItems = <T extends WardrobeItemForCandidate>(input: OutfitCandidateInput<T>) => {
+  // Preserve raw values and input order, including stable duplicate winners.
+  // Product references stay live for ranking metadata that preparation does not read.
+  const key = JSON.stringify([
+    input.catalogProducts.map(product => [preparationObjectId(product), product.id,
+      product.outfitRole, product.category, product.subcategory, product.gender]),
+    input.wardrobeItems.map(item => [preparationObjectId(item), item.id, item.category, item.subcategory]),
+  ]);
+  let prepared = preparationCache.get(key);
+  if (!prepared) {
+    const normalized = normalizeOutfitItems(input);
+    const roleIndices = new Map<OutfitRole, number[]>();
+    normalized.forEach((item, index) => {
+      const group = roleIndices.get(item.role) ?? [];
+      group.push(index);
+      roleIndices.set(item.role, group);
+    });
+    prepared = { normalized, roleIndices };
+    if (preparationCache.size >= 8) preparationCache.delete(preparationCache.keys().next().value!);
+    preparationCache.set(key, prepared);
+  }
+  // The key includes every source object's identity, so this generic binding is exact.
+  const normalized = prepared.normalized.map(item => ({ ...item })) as OutfitCandidateItem<T>[];
+  const byRole = new Map<OutfitRole, OutfitCandidateItem<T>[]>();
+  for (const [role, indices] of prepared.roleIndices) {
+    byRole.set(role, indices.map(index => normalized[index]));
+  }
+  return { normalized, byRole };
+};
+
 /** Search callbacks see valid leaves before IDs, colors, reasons or candidate objects exist. */
 export interface OutfitCandidateSearch<T extends WardrobeItemForCandidate> {
   canExtend: (items: readonly OutfitCandidateItem<T>[],
@@ -85,35 +132,31 @@ export interface OutfitCandidateSearch<T extends WardrobeItemForCandidate> {
 function* candidateWork<T extends WardrobeItemForCandidate>(
   input: OutfitCandidateInput<T>, cooperative = false, search?: OutfitCandidateSearch<T>,
 ): Generator<void, OutfitCandidate<T>[], void> {
-  const normalized = normalizeOutfitItems(input);
+  const { normalized, byRole } = prepareOutfitItems(input);
   const required = input.requiredCatalogProductId
     ? normalized.find((item) => item.sourceType === 'catalog' &&
       item.sourceId === input.requiredCatalogProductId)
     : undefined;
   if (input.requiredCatalogProductId && !required) return [];
-  const byRole = new Map<OutfitRole, OutfitCandidateItem<T>[]>();
-  for (const item of normalized) {
-    const group = byRole.get(item.role) ?? [];
-    group.push(item);
-    byRole.set(item.role, group);
-  }
   const remainingGroups = OPTIONAL_ROLES.map(role => required?.role === role
     ? [required] : byRole.get(role) ?? []);
   const suffixGroups = Array.from({ length: OPTIONAL_ROLES.length + 1 }, (_, index) => remainingGroups.slice(index));
 
   const bases: OutfitCandidateItem<T>[][] = [];
-  for (const top of byRole.get('top') ?? []) {
-    for (const bottom of byRole.get('bottom') ?? []) {
+  // Restrict only the core alternatives that the required role already excludes.
+  // Singleton groups preserve the original order of all retained pairs.
+  const tops = required?.role === 'one_piece' ? []
+    : required?.role === 'top' ? [required] : byRole.get('top') ?? [];
+  const bottoms = required?.role === 'bottom' ? [required] : byRole.get('bottom') ?? [];
+  for (const top of tops) {
+    for (const bottom of bottoms) {
       yield;
-      if (required && (required.role === 'top' || required.role === 'bottom') &&
-          top !== required && bottom !== required) continue;
-      if (required?.role === 'one_piece') continue;
       if (!hasGenderConflict([top, bottom])) bases.push([top, bottom]);
     }
   }
-  for (const onePiece of byRole.get('one_piece') ?? []) {
-    if (required && (required.role === 'top' || required.role === 'bottom' ||
-        required.role === 'one_piece') && onePiece !== required) continue;
+  const onePieces = required?.role === 'top' || required?.role === 'bottom' ? []
+    : required?.role === 'one_piece' ? [required] : byRole.get('one_piece') ?? [];
+  for (const onePiece of onePieces) {
     bases.push([onePiece]);
   }
 

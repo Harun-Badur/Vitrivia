@@ -49,15 +49,37 @@ export const catalogCompatibility = (anchor: Product, product: Product): Catalog
   });
 };
 
+// Weak keys release discarded products; each entry holds only immutable output
+// and private raw evidence, never the caller's mutable color array.
+const semanticKeys = new WeakMap<Product, {
+  evidence: readonly unknown[];
+  colors: readonly string[];
+  key: string;
+}>();
+
 /** Semantic ordering for genuinely equal evidence; identifiers are intentionally excluded. */
-export const catalogSemanticKey = (product: Product): string => recommendationMemoValue('semanticKeyMemo', JSON.stringify([
-  'tr-TR', product.id, product.outfitRole, product.category, product.gender, product.subcategory,
-  product.brand, product.title, getDisplayPrice(product), product.colorSlugs, product.fit,
-]), () => JSON.stringify([
-  product.outfitRole, product.category, product.gender, token(product.subcategory),
-  token(product.brand), token(product.title), getDisplayPrice(product),
-  [...(product.colorSlugs ?? [])].map(token).sort(), token(product.fit),
-]));
+export const catalogSemanticKey = (product: Product): string => {
+  const price = getDisplayPrice(product);
+  const evidence = [product.id, product.outfitRole, product.category, product.gender,
+    product.subcategory, product.brand, product.title, price, product.fit,
+    product.colorSlugs == null ? product.colorSlugs : true];
+  const colors = product.colorSlugs ?? [];
+  const cached = semanticKeys.get(product);
+  let sameColors = cached !== undefined && colors.length === cached.colors.length;
+  for (let index = 0; sameColors && index < colors.length; index++) {
+    sameColors = Object.is(colors[index], cached!.colors[index]);
+  }
+  if (cached && evidence.every((value, index) => Object.is(value, cached.evidence[index])) &&
+      sameColors) return cached.key;
+  const key = JSON.stringify([
+    product.outfitRole, product.category, product.gender, token(product.subcategory),
+    token(product.brand), token(product.title), price,
+    [...colors].map(token).sort(), token(product.fit),
+  ]);
+  // Copy raw colors: the repository or caller can mutate the original array in place.
+  semanticKeys.set(product, { evidence, colors: [...colors], key });
+  return key;
+};
 
 export const sameCatalogProduct = (left: Product, right: Product): boolean => {
 
